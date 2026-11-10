@@ -2,11 +2,12 @@
 OpenBench model training + ONNX export.
 
 Generates a physically-modelled road-vibration dataset (3-axis accelerometer,
-100 Hz, 1.28 s windows), trains three edge models and exports them to ONNX:
+100 Hz, 1.28 s windows), trains nine edge models and exports them to ONNX:
 
   1. mlp_fp32.onnx   - baseline FP32 neural net (scikit-learn MLP)
   2. mlp_int8.onnx   - same network, dynamic INT8 quantization (onnxruntime)
-  3. rf_sklearn.onnx - ultralight Random Forest (scikit-learn -> skl2onnx)
+  ...plus a wider MLP (FP32 + INT8), logistic regression, a single decision
+  tree, a random forest, gradient boosting and k-nearest neighbours.
 
 Also writes 20 static JSON fixtures (5 per class) for the browser playground,
 and a models manifest with held-out accuracy and file sizes.
@@ -22,8 +23,11 @@ import numpy as np
 import onnxruntime as ort
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from skl2onnx import to_onnx
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import accuracy_score, f1_score, recall_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -122,7 +126,7 @@ def onnx_acc(path, X, y):
     t0 = time.perf_counter()
     probs = s.run(None, {name: X})[pi]
     dt = (time.perf_counter() - t0) * 1000 / len(X)
-    return accuracy_score(y, probs.argmax(1)), dt, outs
+    return probs.argmax(1), dt, outs
 
 
 print("Generating dataset ...")
@@ -130,46 +134,81 @@ Xtr, ytr = make(700)
 Xte, yte = make(250)
 print("train", Xtr.shape, "test", Xte.shape)
 
-print("Training MLP ...")
-mlp = make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=(256, 128), max_iter=200,
-                    random_state=0, early_stopping=True, alpha=1e-2))
-mlp.fit(Xtr, ytr)
-print("MLP acc", mlp.score(Xte, yte))
 
-print("Training Random Forest ...")
-rf = RandomForestClassifier(n_estimators=40, max_depth=10, random_state=0, n_jobs=-1)
-rf.fit(Xtr, ytr)
-print("RF acc", rf.score(Xte, yte))
+def scaled(clf):
+    return make_pipeline(StandardScaler(), clf)
 
-opts = {"zipmap": False}
-p_fp32 = os.path.join(OUT_MODELS, "mlp_fp32.onnx")
-p_int8 = os.path.join(OUT_MODELS, "mlp_int8.onnx")
-p_rf = os.path.join(OUT_MODELS, "rf_sklearn.onnx")
 
-for model, path in [(mlp, p_fp32), (rf, p_rf)]:
+def n_params(model):
     clf = model.steps[-1][1] if hasattr(model, "steps") else model
-    onx = to_onnx(model, Xtr[:1], options={id(clf): opts}, target_opset=17)
-    with open(path, "wb") as f:
-        f.write(onx.SerializeToString())
+    if isinstance(clf, MLPClassifier):
+        return int(sum(w.size for w in clf.coefs_) + sum(b.size for b in clf.intercepts_))
+    if isinstance(clf, LogisticRegression):
+        return int(clf.coef_.size + clf.intercept_.size)
+    if isinstance(clf, DecisionTreeClassifier):
+        return int(clf.tree_.node_count)
+    if isinstance(clf, RandomForestClassifier):
+        return int(sum(e.tree_.node_count for e in clf.estimators_))
+    if isinstance(clf, GradientBoostingClassifier):
+        return int(sum(e.tree_.node_count for row in clf.estimators_ for e in row))
+    if isinstance(clf, KNeighborsClassifier):
+        return int(clf._fit_X.size)
+    return 0
 
-quantize_dynamic(p_fp32, p_int8, weight_type=QuantType.QInt8)
+
+# id, display name, family, description, precision, estimator (None = quantized copy of `source`)
+SPECS = [
+    ("mlp_fp32", "TinyMLP FP32", "neural", "Scaler + MLP 384-256-128-4, float32 weights", "fp32",
+     scaled(MLPClassifier((256, 128), max_iter=200, random_state=0, early_stopping=True, alpha=1e-2))),
+    ("mlp_int8", "TinyMLP INT8", "neural", "TinyMLP with dynamic INT8 weight quantization", "int8", "mlp_fp32"),
+    ("wide_fp32", "WideMLP FP32", "neural", "Scaler + MLP 384-512-256-4, float32 weights", "fp32",
+     scaled(MLPClassifier((512, 256), max_iter=200, random_state=1, early_stopping=True, alpha=1e-2))),
+    ("wide_int8", "WideMLP INT8", "neural", "WideMLP with dynamic INT8 weight quantization", "int8", "wide_fp32"),
+    ("logreg", "Logistic Regression", "linear", "Scaler + multinomial logistic regression, 1,540 weights", "fp32",
+     scaled(LogisticRegression(max_iter=2000, C=0.5))),
+    ("dtree", "Decision Tree", "trees", "Single tree, depth 8, a few comparisons per prediction", "trees",
+     DecisionTreeClassifier(max_depth=8, random_state=0)),
+    ("rf_sklearn", "Random Forest", "trees", "40 trees, depth 10, majority vote", "trees",
+     RandomForestClassifier(n_estimators=40, max_depth=10, random_state=0, n_jobs=-1)),
+    ("gboost", "Gradient Boosting", "trees", "60 boosted depth-3 trees per class", "trees",
+     GradientBoostingClassifier(n_estimators=60, max_depth=3, random_state=0)),
+    ("knn", "k-Nearest Neighbours", "instance", "k=5, keeps all 2,800 training windows in the model", "fp32",
+     scaled(KNeighborsClassifier(n_neighbors=5))),
+]
 
 manifest = {"classes": CLASSES, "input": {"channels": 3, "length": N, "fs": FS,
                                            "layout": "[x(128), y(128), z(128)] flattened, units g"},
             "models": []}
-meta = [
-    ("mlp_fp32", "TinyMLP FP32", "StandardScaler + MLP 384-256-128-4, float32 weights", "fp32", p_fp32),
-    ("mlp_int8", "TinyMLP INT8", "Same net, dynamic INT8 weight quantization (onnxruntime)", "int8", p_int8),
-    ("rf_sklearn", "Random Forest", "40 trees, depth 10, scikit-learn -> skl2onnx", "trees", p_rf),
-]
-for mid, name, desc, prec, path in meta:
-    acc, ms, outs = onnx_acc(path, Xte, yte)
-    print(f"{mid}: acc={acc:.4f} cpu={ms:.3f}ms/sample size={mb(path):.3f}MB outputs={outs}")
-    manifest["models"].append({
-        "id": mid, "name": name, "description": desc, "precision": prec,
-        "file": f"models/{os.path.basename(path)}", "sizeMB": round(mb(path), 4),
-        "heldOutAccuracy": round(float(acc), 4), "heldOutSamples": int(len(yte)),
-    })
+paths, fitted = {}, {}
+for mid, name, family, desc, prec, est in SPECS:
+    path = os.path.join(OUT_MODELS, f"{mid}.onnx")
+    if isinstance(est, str):
+        print(f"Quantizing {est} -> {mid}")
+        quantize_dynamic(paths[est], path, weight_type=QuantType.QInt8)
+        params = fitted[est]
+    else:
+        print(f"Training {mid} ...")
+        est.fit(Xtr, ytr)
+        clf = est.steps[-1][1] if hasattr(est, "steps") else est
+        onx = to_onnx(est, Xtr[:1], options={id(clf): {"zipmap": False}}, target_opset=17)
+        with open(path, "wb") as f:
+            f.write(onx.SerializeToString())
+        params = n_params(est)
+    paths[mid], fitted[mid] = path, params
+    pred, ms, outs = onnx_acc(path, Xte, yte)
+    hazard = np.isin(yte, [2, 3])
+    m = {
+        "id": mid, "name": name, "family": family, "description": desc, "precision": prec,
+        "file": f"models/{mid}.onnx", "sizeMB": round(mb(path), 4), "params": params,
+        "heldOutAccuracy": round(float(accuracy_score(yte, pred)), 4),
+        "heldOutMacroF1": round(float(f1_score(yte, pred, average="macro")), 4),
+        "heldOutHazardRecall": round(float(np.mean(pred[hazard] == yte[hazard])), 4),
+        "heldOutRecall": [round(float(r), 4) for r in recall_score(yte, pred, average=None)],
+        "heldOutSamples": int(len(yte)),
+    }
+    print(f"  acc={m['heldOutAccuracy']} f1={m['heldOutMacroF1']} hazard={m['heldOutHazardRecall']} "
+          f"size={m['sizeMB']}MB params={params} cpu={ms:.4f}ms")
+    manifest["models"].append(m)
 
 with open(os.path.join(OUT_MODELS, "manifest.json"), "w") as f:
     json.dump(manifest, f, indent=2)

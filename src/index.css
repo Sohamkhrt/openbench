@@ -7,3 +7,17 @@ body { @apply bg-zinc-950 text-zinc-200 antialiased; }
 input[type='range'] { @apply w-full accent-emerald-400; }
 .card { @apply rounded-xl border border-zinc-800 bg-zinc-900/60; }
 .label { @apply text-[11px] font-medium uppercase tracking-wider text-zinc-500; }
+
+/* live inference animations */
+@keyframes sweep { from { transform: translateX(0); } to { transform: translateX(600px); } }
+.sweep { animation-name: sweep; animation-timing-function: linear; animation-fill-mode: forwards; }
+@keyframes stage-glow {
+  0% { border-color: #27272a; box-shadow: none; }
+  30% { border-color: var(--stage-color); box-shadow: 0 0 0 1px var(--stage-color), 0 0 18px -4px var(--stage-color); }
+  100% { border-color: #3f3f46; box-shadow: none; }
+}
+.stage-on { animation: stage-glow 600ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .sweep, .stage-on { animation: none; }
+}
+html { scroll-behavior: smooth; }

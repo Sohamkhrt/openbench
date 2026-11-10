@@ -1,14 +1,12 @@
 # 90-second demo video script
 
-Record at 1440x900 in Chrome, live mode. Close other tabs so latency is stable.
+Record at 1440x900 in Chrome, live mode, animation speed "Normal". Close other tabs so latency is stable.
 
 | Time | On screen | Voice-over |
 |---|---|---|
-| 0:00-0:10 | Landing page, cursor on the "100% client-side · $0 compute" badge | "Moving ML models to edge hardware fails on latency spikes, size and memory you never saw in the notebook. OpenBench shows those trade-offs in the browser, for free." |
-| 0:10-0:20 | Open DevTools Network tab briefly, then close | "No server, no GPU, no API keys. Three ONNX models run right here through onnxruntime-web and WebAssembly." |
-| 0:20-0:35 | Click **Run benchmark**, progress bars fill per model | "It warms each model up, then times every inference with performance.now() on 20 road-vibration sensor windows: smooth road, rough road, potholes and speed bumps." |
-| 0:35-0:50 | Model cards and EVS chart | "The Edge Viability Score combines accuracy, latency and size. INT8 quantization cuts the network to a quarter of its size with no accuracy loss, and a tiny random forest wins outright." |
-| 0:50-1:00 | Latency timeline, hover a spike | "Here is per-inference jitter. Spikes like this are what break real-time loops on a microcontroller." |
-| 1:00-1:10 | Drag latency and size budget sliders, badges flip | "Set your device's budget and see which models still fit." |
-| 1:10-1:20 | Drag sensor noise to 0.2 g, rerun, open a pothole in the signal inspector | "Add sensor noise to stress-test robustness and see which model breaks first." |
-| 1:20-1:30 | Switch to Playback, click Export JSON, end on GitHub link | "A recorded playback guarantees the demo never fails, and every run exports as JSON. OpenBench is open source and costs nothing to run." |
+| 0:00-0:10 | Hero text, cursor on the "100% client-side · $0 compute" badge | "Moving ML models to edge hardware fails on latency spikes, size and memory you never saw in the notebook. OpenBench shows those trade-offs in your browser, for free." |
+| 0:10-0:30 | Click **Run benchmark on 9 models**; the sweep line crosses the signal, the pipeline lights up, probabilities fill, scoreboard turns green and red | "Nine ONNX models run right here through onnxruntime-web. You can watch each one read 1.28 seconds of accelerometer data and decide: smooth road, rough road, pothole or speed bump. Every square is a real inference." |
+| 0:30-0:45 | Scroll to Prediction quality and Speed; open one "What this means for you" | "Fourteen metrics, each ranked and explained. Hazard recall is the safety number: how many potholes it actually catches. Latency is timed with performance.now(), p50 and p95." |
+| 0:45-0:55 | Footprint section, point at hatched INT8 bars | "INT8 quantization makes the network four times smaller with no accuracy loss. kNN drags its whole training set along, which is why it's a bad edge choice." |
+| 0:55-1:15 | What should I pick?: switch device from Raspberry Pi Pico to Arduino Nano, drag minimum accuracy | "Tell it your hardware. On a Pico it picks the random forest; on an Arduino with 256 KB it switches to gradient boosting, and explains what each choice means." |
+| 1:15-1:30 | Switch to Playback, then Export JSON, end on GitHub link | "A recorded playback guarantees the demo never fails, and every run exports as JSON. OpenBench is open source and costs nothing to run." |

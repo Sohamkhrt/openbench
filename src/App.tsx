@@ -1,17 +1,48 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, CheckCircle2, Cpu, Download, Gauge, Github, HardDrive, Info, Play,
-  RotateCcw, Target, Timer, Trophy, XCircle, Zap,
+  Activity, AlertTriangle, Download, Eye, Gauge, Github, HardDrive, Info, Layers, ListChecks, Play,
+  RotateCcw, ShieldCheck, Sparkles, Table2, Target, Timer, Trophy,
 } from 'lucide-react'
-import { benchmarkModel, evs, loadFixtures, loadJSON, loadManifest, prepareInputs } from './lib/bench'
+import { benchmarkModel, warmRuntime, loadFixtures, loadJSON, loadManifest, prepareInputs, type Phase } from './lib/bench'
+import { METRICS, SECTIONS, type SectionId, colorFor, fillFor, makeRow, metricById, type Row } from './lib/metrics'
 import type { Backend, BenchReport, BenchSettings, FixtureSet, Manifest, ModelResult } from './lib/types'
-import { EvsBar, LatencyTimeline, SignalPlot, TradeoffScatter, colorFor, type Row } from './components/Charts'
+import { LatencyTimeline, TradeoffScatter } from './components/Charts'
+import { GlobalHatchDefs, MetricCard } from './components/Leaderboard'
+import { Theater, type WatchState } from './components/Theater'
+import { Recommendations, type Constraints } from './components/Verdicts'
 
 type Mode = 'live' | 'playback'
 type AccSource = 'live' | 'heldout'
 
 const REPO_URL = 'https://github.com/Sohamkhrt/openbench'
 const fmt = (n: number, d = 2) => (Number.isFinite(n) ? n.toFixed(d) : '-')
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+const SPEEDS = [
+  { label: 'Slow', ms: 220 },
+  { label: 'Normal', ms: 70 },
+  { label: 'Skip', ms: 0 },
+]
+
+const SECTION_ICON: Record<string, React.ReactNode> = {
+  live: <Eye className="h-3.5 w-3.5" />,
+  overall: <Trophy className="h-3.5 w-3.5" />,
+  quality: <Target className="h-3.5 w-3.5" />,
+  speed: <Timer className="h-3.5 w-3.5" />,
+  footprint: <HardDrive className="h-3.5 w-3.5" />,
+  robustness: <ShieldCheck className="h-3.5 w-3.5" />,
+  tradeoffs: <Layers className="h-3.5 w-3.5" />,
+  pick: <Sparkles className="h-3.5 w-3.5" />,
+  raw: <Table2 className="h-3.5 w-3.5" />,
+}
+
+const NAV = [
+  { id: 'live', title: 'Live inference' },
+  ...SECTIONS.map((s) => ({ id: s.id, title: s.title })),
+  { id: 'tradeoffs', title: 'Trade-offs' },
+  { id: 'pick', title: 'What should I pick?' },
+  { id: 'raw', title: 'Raw data' },
+]
 
 export default function App() {
   const [manifest, setManifest] = useState<Manifest | null>(null)
@@ -19,78 +50,123 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [mode, setMode] = useState<Mode>('live')
-  const [settings, setSettings] = useState<BenchSettings>({ backend: 'wasm', runs: 10, warmup: 5, noise: 0 })
-  const [latBudget, setLatBudget] = useState(0.15)
-  const [sizeBudget, setSizeBudget] = useState(0.45)
-  const [accSource, setAccSource] = useState<AccSource>('live')
+  const [settings, setSettings] = useState<BenchSettings>({ backend: 'wasm', runs: 10, warmup: 5, noise: 0, watchDelay: 70 })
+  const [accSource, setAccSource] = useState<AccSource>('heldout')
+  const [constraints, setConstraints] = useState<Constraints>({ deviceId: 'pico', minAccuracy: 0.9, latencyBudgetMs: 0.5 })
+  const [enabled, setEnabled] = useState<Record<string, boolean>>({})
 
   const [results, setResults] = useState<ModelResult[]>([])
+  const [recorded, setRecorded] = useState(false)
   const [running, setRunning] = useState(false)
-  const [progress, setProgress] = useState<{ model: string; pct: number } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [selected, setSelected] = useState(0)
+  const [selected, setSelected] = useState(10)
+  const [highlight, setHighlight] = useState<string | null>(null)
+
+  // live inference state
+  const [watch, setWatch] = useState<WatchState | null>(null)
+  const [phases, setPhases] = useState<Record<string, Phase>>({})
+  const [cells, setCells] = useState<Record<string, (boolean | null)[]>>({})
+  const [progress, setProgress] = useState<Record<string, number>>({})
+  const tickRef = useRef(0)
 
   useEffect(() => {
-    Promise.all([loadManifest(), loadFixtures()])
-      .then(([m, f]) => { setManifest(m); setFixtures(f) })
+    Promise.all([loadManifest(), loadFixtures(), loadJSON<BenchReport>('playback.json').catch(() => null)])
+      .then(([m, f, rep]) => {
+        setManifest(m)
+        setFixtures(f)
+        setEnabled(Object.fromEntries(m.models.map((x) => [x.id, true])))
+        if (rep) {
+          // Show a recorded run immediately so the page is never empty.
+          setResults(rep.results)
+          setRecorded(true)
+          setCells(fillCells(rep.results, f))
+        }
+      })
       .catch((e) => setLoadError(String(e)))
   }, [])
 
-  const inputs = useMemo(
-    () => (fixtures ? prepareInputs(fixtures.samples, settings.noise) : []),
-    [fixtures, settings.noise],
-  )
+  const inputs = useMemo(() => (fixtures ? prepareInputs(fixtures.samples, settings.noise) : []), [fixtures, settings.noise])
+
+  const activeModels = useMemo(() => manifest?.models.filter((m) => enabled[m.id]) ?? [], [manifest, enabled])
 
   const rows: Row[] = useMemo(() => {
     if (!manifest) return []
     return results
       .map((r) => {
         const meta = manifest.models.find((m) => m.id === r.modelId)
-        if (!meta || r.error) return null
-        const accuracy = accSource === 'live' ? r.accuracy : meta.heldOutAccuracy
-        return { meta, result: r, accuracy, evs: evs(accuracy, r.p50Ms, meta.sizeMB) }
+        return meta && enabled[meta.id] && !r.error ? makeRow(meta, r, accSource) : null
       })
       .filter((r): r is Row => r !== null)
-  }, [results, manifest, accSource])
+  }, [results, manifest, accSource, enabled])
 
-  const best = rows.length ? rows.reduce((a, b) => (b.evs > a.evs ? b : a)) : null
+  function fillCells(rs: ModelResult[], f: FixtureSet) {
+    return Object.fromEntries(rs.map((r) => [r.modelId, r.predictions.map((p, i) => p === f.samples[i].labelIndex)]))
+  }
+
+  function resetLive() {
+    setResults([])
+    setRecorded(false)
+    setWatch(null)
+    setPhases({})
+    setProgress({})
+    setCells({})
+  }
+
+  const step = (modelId: string, sampleIndex: number, probs: number[], ms: number, label: number) => {
+    tickRef.current++
+    setWatch({ modelId, sampleIndex, probs, ms, tick: tickRef.current })
+    const k = probs.indexOf(Math.max(...probs))
+    setCells((prev) => {
+      const row = [...(prev[modelId] ?? Array(20).fill(null))]
+      row[sampleIndex] = k === label
+      return { ...prev, [modelId]: row }
+    })
+  }
 
   async function playback(reason?: string) {
+    if (!fixtures) return
     setMode('playback')
     if (reason) setNotice(reason)
     const report = await loadJSON<BenchReport>('playback.json')
-    setSettings((s) => ({ ...report.settings, noise: s.noise }))
-    setResults([])
-    // Replay one model at a time so the dashboard animates like a live run.
-    for (let i = 0; i < report.results.length; i++) {
-      const r = report.results[i]
-      for (let p = 0; p <= 100; p += 20) {
-        setProgress({ model: r.modelId, pct: p })
-        await new Promise((res) => setTimeout(res, 70))
+    resetLive()
+    const delay = Math.min(settings.watchDelay, 40)
+    for (const r of report.results.filter((x) => enabled[x.modelId])) {
+      setPhases((p) => ({ ...p, [r.modelId]: 'watching' }))
+      if (delay > 0) {
+        for (let i = 0; i < fixtures.samples.length; i++) {
+          step(r.modelId, i, r.probs?.[i] ?? [], 0, fixtures.samples[i].labelIndex)
+          await sleep(delay)
+        }
       }
+      setPhases((p) => ({ ...p, [r.modelId]: 'done' }))
       setResults((prev) => [...prev, r])
     }
-    setProgress(null)
+    setCells(fillCells(report.results, fixtures))
+    setRecorded(true)
   }
 
   async function run() {
     if (!manifest || !fixtures || running) return
     setRunning(true)
     setNotice(null)
-    setResults([])
+    document.getElementById('live')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     try {
       if (mode === 'playback') {
         await playback()
         return
       }
+      resetLive()
       const out: ModelResult[] = []
       const fallbacks: string[] = []
-      for (const m of manifest.models) {
-        setProgress({ model: m.id, pct: 0 })
+      // Smallest model warms up the Wasm runtime so cold start compares models, not the runtime.
+      await warmRuntime([...manifest.models].sort((x, y) => x.sizeMB - y.sizeMB)[0])
+      for (const m of activeModels) {
         try {
-          const r = await benchmarkModel(m, fixtures.samples, inputs, manifest.classes.length, settings, (d, t) =>
-            setProgress({ model: m.id, pct: Math.round((d / t) * 100) }),
-          )
+          const r = await benchmarkModel(m, fixtures.samples, inputs, manifest.classes.length, settings, {
+            onPhase: (id, ph) => setPhases((p) => ({ ...p, [id]: ph })),
+            onVisual: (s) => step(s.modelId, s.sampleIndex, s.probs, s.ms, fixtures.samples[s.sampleIndex].labelIndex),
+            onProgress: (id, pct) => setProgress((p) => ({ ...p, [id]: pct })),
+          })
           if (r.backendUsed !== settings.backend) fallbacks.push(m.name)
           out.push(r)
         } catch (e) {
@@ -98,8 +174,8 @@ export default function App() {
         }
         setResults([...out])
       }
+      setCells(fillCells(out, fixtures))
       if (fallbacks.length) setNotice(`${settings.backend} has no kernels for ${fallbacks.join(', ')}, so those ran on Wasm.`)
-      setProgress(null)
     } catch (e) {
       console.error(e)
       await playback(`Live inference failed (${e instanceof Error ? e.message : e}). Showing recorded playback instead.`)
@@ -118,17 +194,18 @@ export default function App() {
     URL.revokeObjectURL(a.href)
   }
 
-  if (loadError) {
-    return <div className="p-10 text-rose-400">Could not load models or fixtures: {loadError}</div>
-  }
+  if (loadError) return <div className="p-10 text-rose-400">Could not load models or fixtures: {loadError}</div>
+  if (!manifest || !fixtures) return <div className="grid min-h-screen place-items-center text-sm text-zinc-500">Loading models…</div>
 
-  const sample = fixtures?.samples[selected]
+  const evsMetric = metricById('evs')
+  const disabled = running || mode === 'playback'
 
   return (
     <div className="min-h-screen">
+      <GlobalHatchDefs ids={manifest.models.map((m) => m.id)} />
       {/* Header */}
-      <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
+      <header className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/85 backdrop-blur">
+        <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
           <div className="flex items-center gap-2">
             <div className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-400/10 ring-1 ring-emerald-400/30">
               <Activity className="h-4 w-4 text-emerald-400" />
@@ -144,12 +221,8 @@ export default function App() {
           <div className="ml-auto flex items-center gap-2">
             <div className="flex rounded-lg border border-zinc-800 p-0.5 text-xs" role="tablist" aria-label="Mode">
               {(['live', 'playback'] as Mode[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setMode(m)}
-                  disabled={running}
-                  className={`rounded-md px-3 py-1 capitalize transition ${mode === m ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
-                >
+                <button key={m} onClick={() => setMode(m)} disabled={running}
+                  className={`rounded-md px-3 py-1 capitalize transition ${mode === m ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}>
                   {m}
                 </button>
               ))}
@@ -161,219 +234,222 @@ export default function App() {
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-7xl gap-5 px-4 py-6 sm:px-6 lg:grid-cols-[300px_1fr]">
-        {/* Controls */}
-        <aside className="space-y-4 lg:sticky lg:top-20 lg:self-start">
-          <section className="card space-y-5 p-4">
-            <div>
-              <p className="label mb-2">Execution provider</p>
-              <div className="grid grid-cols-2 gap-1 rounded-lg border border-zinc-800 p-0.5 text-xs">
-                {(['wasm', 'webgpu'] as Backend[]).map((b) => (
-                  <button
-                    key={b}
-                    disabled={running || mode === 'playback'}
-                    onClick={() => setSettings({ ...settings, backend: b })}
-                    className={`rounded-md py-1.5 font-mono transition ${settings.backend === b ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'} disabled:opacity-50`}
-                  >
-                    {b}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <Slider label="Timed runs per sample" value={settings.runs} min={1} max={50} step={1} display={`${settings.runs} × ${fixtures?.samples.length ?? 0}`} onChange={(v) => setSettings({ ...settings, runs: v })} disabled={running || mode === 'playback'} />
-            <Slider label="Warm-up inferences" value={settings.warmup} min={0} max={30} step={1} display={`${settings.warmup}`} onChange={(v) => setSettings({ ...settings, warmup: v })} disabled={running || mode === 'playback'} />
-            <Slider label="Sensor noise σ" value={settings.noise} min={0} max={0.3} step={0.01} display={`${settings.noise.toFixed(2)} g`} onChange={(v) => setSettings({ ...settings, noise: v })} disabled={running || mode === 'playback'} hint="Adds Gaussian noise to every fixture to stress-test robustness." />
-
-            <button
-              onClick={run}
-              disabled={running || !manifest}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-500 py-2.5 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-wait disabled:opacity-60"
-            >
-              {running ? <RotateCcw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              {running ? 'Benchmarking…' : mode === 'live' ? 'Run benchmark' : 'Play recorded run'}
-            </button>
-            {progress && (
-              <div>
-                <div className="mb-1 flex justify-between text-[11px] text-zinc-500">
-                  <span>{manifest?.models.find((m) => m.id === progress.model)?.name}</span>
-                  <span>{progress.pct}%</span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
-                  <div className="h-full transition-all" style={{ width: `${progress.pct}%`, background: colorFor(progress.model) }} />
-                </div>
-              </div>
-            )}
-          </section>
-
-          <section className="card space-y-5 p-4">
-            <p className="label">Deployment budget</p>
-            <Slider label="Latency budget (p95)" value={latBudget} min={0.01} max={1} step={0.01} display={`${latBudget.toFixed(2)} ms`} onChange={setLatBudget} />
-            <Slider label="Model size budget" value={sizeBudget} min={0.05} max={2} step={0.05} display={`${sizeBudget.toFixed(2)} MB`} onChange={setSizeBudget} />
-            <div>
-              <p className="label mb-2">Accuracy used in EVS</p>
-              <div className="grid grid-cols-2 gap-1 rounded-lg border border-zinc-800 p-0.5 text-xs">
-                {([['live', 'Fixtures (live)'], ['heldout', 'Held-out set']] as [AccSource, string][]).map(([k, l]) => (
-                  <button key={k} onClick={() => setAccSource(k)} className={`rounded-md py-1.5 transition ${accSource === k ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}>
-                    {l}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          <section className="card p-4 text-xs leading-relaxed text-zinc-400">
-            <p className="label mb-2">Edge Viability Score</p>
-            <p className="font-mono text-[13px] text-zinc-200">EVS = (Acc × 100) / (Latency<sub>ms</sub> × Size<sub>MB</sub>)</p>
-            <p className="mt-2">Latency is the median per-call time of <span className="font-mono">session.run()</span>, measured with <span className="font-mono">performance.now()</span>. Higher is better.</p>
-          </section>
-        </aside>
-
-        {/* Results */}
-        <div className="min-w-0 space-y-5">
-          {notice && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {notice}
-            </div>
-          )}
-          {mode === 'playback' && (
-            <div className="flex items-start gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
-              <Info className="mt-0.5 h-4 w-4 shrink-0" /> Playback mode replays a benchmark recorded in headless Chromium (Wasm, 1 thread). Switch to Live to measure your own device.
-            </div>
-          )}
-
-          {/* Model cards */}
-          <div className="grid gap-4 md:grid-cols-3">
-            {manifest?.models.map((m) => {
-              const row = rows.find((r) => r.meta.id === m.id)
-              const passLat = row ? row.result.p95Ms <= latBudget : null
-              const passSize = m.sizeMB <= sizeBudget
-              const isBest = best && row && best.meta.id === m.id
-              return (
-                <div key={m.id} className={`card relative p-4 ${isBest ? 'ring-1 ring-emerald-400/50' : ''}`}>
-                  <div className="absolute inset-x-0 top-0 h-0.5 rounded-t-xl" style={{ background: colorFor(m.id) }} />
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <h3 className="text-sm font-semibold text-zinc-100">{m.name}</h3>
-                      <p className="mt-0.5 text-[11px] text-zinc-500">{m.description}</p>
-                    </div>
-                    <span className="rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] uppercase text-zinc-400">{m.precision}</span>
-                  </div>
-                  <div className="mt-4 flex items-end justify-between">
-                    <div>
-                      <p className="label">EVS</p>
-                      <p className="font-mono text-3xl font-semibold tabular-nums text-zinc-50">{row ? Math.round(row.evs).toLocaleString() : '-'}</p>
-                    </div>
-                    {isBest && (
-                      <span className="flex items-center gap-1 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] text-emerald-300">
-                        <Trophy className="h-3 w-3" /> Most viable
-                      </span>
-                    )}
-                  </div>
-                  <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-                    <Stat icon={<Target className="h-3.5 w-3.5" />} label="Accuracy" value={row ? `${fmt(row.accuracy * 100, 1)}%` : '-'} />
-                    <Stat icon={<Timer className="h-3.5 w-3.5" />} label="p50 latency" value={row ? `${fmt(row.result.p50Ms, 3)} ms` : '-'} />
-                    <Stat icon={<HardDrive className="h-3.5 w-3.5" />} label="Size" value={`${fmt(m.sizeMB, 3)} MB`} />
-                    <Stat icon={<Zap className="h-3.5 w-3.5" />} label="p95 latency" value={row ? `${fmt(row.result.p95Ms, 3)} ms` : '-'} />
-                  </dl>
-                  <div className="mt-4 flex gap-2 text-[11px]">
-                    <Budget ok={passLat} label="Latency" />
-                    <Budget ok={passSize} label="Size" />
-                  </div>
-                </div>
-              )
-            })}
+      <div className="mx-auto max-w-[1400px] px-4 sm:px-6">
+        {/* Hero + controls */}
+        <section className="grid gap-5 py-6 lg:grid-cols-[1fr_380px]">
+          <div className="flex flex-col justify-center">
+            <h2 className="text-2xl font-semibold tracking-tight text-zinc-50 sm:text-3xl">Which model should go on your edge device?</h2>
+            <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
+              A car-mounted accelerometer has to tell <b className="text-zinc-200">smooth road</b>, <b className="text-zinc-200">rough road</b>, <b className="text-zinc-200">potholes</b> and <b className="text-zinc-200">speed bumps</b> apart, on a chip with little memory and no internet.
+              OpenBench loads {manifest.models.length} candidate models into your browser, runs every one on the same 20 sensor recordings, and measures how accurate, fast, small and noise-tolerant each is. Nothing leaves your device.
+            </p>
+            <ol className="mt-4 grid gap-2 text-xs sm:grid-cols-3">
+              {[
+                ['1', 'Watch', 'See each model read the signal and make its call, live.'],
+                ['2', 'Compare', 'Ranked charts for 14 metrics, each explained in plain English.'],
+                ['3', 'Pick', 'Set your device and budget; get a recommendation and why.'],
+              ].map(([n, t, d]) => (
+                <li key={n} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                  <span className="font-mono text-emerald-400">{n}</span> <b className="text-zinc-200">{t}</b>
+                  <p className="mt-1 text-zinc-500">{d}</p>
+                </li>
+              ))}
+            </ol>
           </div>
 
-          {rows.length === 0 && !running && (
-            <div className="card grid place-items-center gap-2 p-10 text-center">
-              <Gauge className="h-8 w-8 text-zinc-600" />
-              <p className="text-sm text-zinc-300">Press <b>Run benchmark</b> to load three ONNX models and profile them on {fixtures?.samples.length ?? 20} road-vibration samples.</p>
-              <p className="text-xs text-zinc-500">Everything runs locally through onnxruntime-web (WebAssembly). No data leaves your device.</p>
+          <div className="card space-y-4 p-4">
+            <button onClick={run} disabled={running}
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-500 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-wait disabled:opacity-60">
+              {running ? <RotateCcw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              {running ? 'Benchmarking…' : mode === 'live' ? `Run benchmark on ${activeModels.length} models` : 'Replay recorded run'}
+            </button>
+            <div>
+              <p className="label mb-1.5">Animation speed</p>
+              <Segmented options={SPEEDS.map((s) => ({ key: String(s.ms), label: s.label }))} value={String(settings.watchDelay)} onChange={(v) => setSettings({ ...settings, watchDelay: +v })} disabled={running} />
             </div>
-          )}
-
-          {rows.length > 0 && (
-            <div className="grid gap-4 xl:grid-cols-2">
-              <Panel title="Edge Viability Score" icon={<Trophy className="h-4 w-4" />}><EvsBar rows={rows} /></Panel>
-              <Panel title="Accuracy vs latency (bubble = size)" icon={<Target className="h-4 w-4" />}><TradeoffScatter rows={rows} /></Panel>
-              <div className="xl:col-span-2">
-                <Panel title="Per-inference latency (spikes show jitter)" icon={<Timer className="h-4 w-4" />}><LatencyTimeline rows={rows} budget={latBudget} /></Panel>
+            <Slider label="Timed runs per sample" value={settings.runs} min={1} max={50} step={1} display={`${settings.runs} × ${fixtures.samples.length}`} onChange={(v) => setSettings({ ...settings, runs: v })} disabled={disabled} />
+            <Slider label="Warm-up inferences" value={settings.warmup} min={0} max={30} step={1} display={`${settings.warmup}`} onChange={(v) => setSettings({ ...settings, warmup: v })} disabled={disabled} />
+            <Slider label="Extra sensor noise σ" value={settings.noise} min={0} max={0.3} step={0.01} display={`${settings.noise.toFixed(2)} g`} onChange={(v) => setSettings({ ...settings, noise: v })} disabled={disabled} />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="label mb-1.5">Provider</p>
+                <Segmented options={[{ key: 'wasm', label: 'wasm' }, { key: 'webgpu', label: 'webgpu' }]} value={settings.backend} onChange={(v) => setSettings({ ...settings, backend: v as Backend })} disabled={disabled} mono />
+              </div>
+              <div>
+                <p className="label mb-1.5">EVS accuracy</p>
+                <Segmented options={[{ key: 'heldout', label: 'Held-out' }, { key: 'live', label: 'Fixtures' }]} value={accSource} onChange={(v) => setAccSource(v as AccSource)} />
               </div>
             </div>
-          )}
+          </div>
+        </section>
 
-          {/* Signal inspector */}
-          {fixtures && sample && (
-            <Panel title="Signal inspector" icon={<Activity className="h-4 w-4" />}
-              right={
-                <select value={selected} onChange={(e) => setSelected(+e.target.value)} className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-200">
-                  {fixtures.samples.map((s, i) => <option key={s.id} value={i}>{s.id}</option>)}
-                </select>
-              }>
-              <SignalPlot data={Array.from(inputs[selected] ?? sample.data)} length={fixtures.length} />
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                <span className="text-zinc-500">Ground truth:</span>
-                <span className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-zinc-100">{sample.label}</span>
-                {rows.map((r) => {
-                  const p = r.result.predictions[selected]
-                  const ok = p === sample.labelIndex
-                  return (
-                    <span key={r.meta.id} className={`flex items-center gap-1 rounded border px-2 py-0.5 font-mono ${ok ? 'border-emerald-500/30 text-emerald-300' : 'border-rose-500/30 text-rose-300'}`}>
-                      <span className="h-1.5 w-1.5 rounded-full" style={{ background: colorFor(r.meta.id) }} />
-                      {r.meta.name}: {manifest?.classes[p] ?? '?'} ({fmt((r.result.confidences[selected] ?? 0) * 100, 0)}%)
-                    </span>
-                  )
-                })}
-              </div>
-            </Panel>
-          )}
+        {notice && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {notice}
+          </div>
+        )}
+        {recorded && !running && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+            <Info className="mt-0.5 h-4 w-4 shrink-0" /> Showing a run recorded in headless Chromium (Wasm, 1 thread). {mode === 'live' ? 'Press Run to measure your own device.' : 'Switch to Live to measure your own device.'}
+          </div>
+        )}
 
-          {/* Detail table */}
-          {rows.length > 0 && (
-            <Panel title="Full results" icon={<Cpu className="h-4 w-4" />}
-              right={<button onClick={exportReport} className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:text-zinc-50"><Download className="h-3.5 w-3.5" /> Export JSON</button>}>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[640px] text-left text-xs">
-                  <thead className="text-zinc-500">
-                    <tr className="border-b border-zinc-800">
-                      {['Model', 'Backend', 'Fixture acc', 'Held-out acc', 'Calls/timing', 'Mean', 'p50', 'p95', 'Max', 'σ', 'Load', 'Size', 'EVS'].map((h) => <th key={h} className="py-2 pr-3 font-medium">{h}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody className="font-mono tabular-nums text-zinc-300">
-                    {rows.map((r) => (
-                      <tr key={r.meta.id} className="border-b border-zinc-800/60">
-                        <td className="py-2 pr-3 font-sans text-zinc-100">{r.meta.name}</td>
-                        <td className="pr-3">{r.result.backendUsed}</td>
-                        <td className="pr-3">{r.result.correct}/{r.result.total}</td>
-                        <td className="pr-3">{fmt(r.meta.heldOutAccuracy * 100, 1)}%</td>
-                        <td className="pr-3">×{r.result.callsPerTiming ?? 1}</td>
-                        <td className="pr-3">{fmt(r.result.meanMs, 3)}</td>
-                        <td className="pr-3">{fmt(r.result.p50Ms, 3)}</td>
-                        <td className="pr-3">{fmt(r.result.p95Ms, 3)}</td>
-                        <td className="pr-3">{fmt(r.result.maxMs, 3)}</td>
-                        <td className="pr-3">{fmt(r.result.stdMs, 3)}</td>
-                        <td className="pr-3">{fmt(r.result.loadMs, 1)}</td>
-                        <td className="pr-3">{fmt(r.meta.sizeMB, 3)}</td>
-                        <td className="pr-3 text-zinc-50">{Math.round(r.evs).toLocaleString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <p className="mt-2 text-[11px] text-zinc-500">Latencies in ms per call. Each timing averages a calibrated batch of back-to-back calls because browsers round performance.now() to about 0.1 ms. Held-out accuracy is from {manifest?.models[0]?.heldOutSamples ?? 1000} samples at training time; fixture accuracy is measured live on this page.</p>
-              </div>
-            </Panel>
-          )}
+        {/* model picker */}
+        <div className="mb-5 flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-xs text-zinc-500">Comparing <b className="text-zinc-200">{activeModels.length}</b> of {manifest.models.length} models</span>
+          {manifest.models.map((m) => (
+            <button key={m.id} onClick={() => setEnabled({ ...enabled, [m.id]: !enabled[m.id] })} disabled={running}
+              onMouseEnter={() => setHighlight(m.id)} onMouseLeave={() => setHighlight(null)}
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${enabled[m.id] ? 'border-zinc-700 bg-zinc-900 text-zinc-200' : 'border-zinc-800 text-zinc-600 line-through'}`}>
+              <svg width="10" height="10" aria-hidden><rect width="10" height="10" rx="2" fill={fillFor(m)} opacity={enabled[m.id] ? 1 : 0.3} /></svg>
+              {m.name}
+            </button>
+          ))}
+          <span className="ml-auto text-[11px] text-zinc-600">Hatched bars = INT8 quantized</span>
         </div>
-      </main>
 
-      <footer className="mx-auto max-w-7xl px-4 pb-8 text-[11px] text-zinc-600 sm:px-6">
-        OpenBench · MIT licensed · onnxruntime-web, React, Recharts · <a className="underline hover:text-zinc-400" href={REPO_URL}>source</a>
+        <div className="grid gap-6 lg:grid-cols-[200px_1fr]">
+          {/* section nav */}
+          <nav className="hidden lg:block">
+            <ul className="sticky top-20 space-y-0.5 text-[13px]">
+              {NAV.map((n) => (
+                <li key={n.id}>
+                  <a href={`#${n.id}`} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100">
+                    <span className="text-zinc-600">{SECTION_ICON[n.id]}</span>{n.title}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+
+          <main className="min-w-0 space-y-10 pb-16">
+            <Theater
+              models={activeModels} classes={manifest.classes} samples={fixtures.samples} inputs={inputs} length={fixtures.length}
+              watch={watch} phases={phases} cells={cells} progress={progress} running={running} sweepMs={settings.watchDelay}
+              selected={selected} onPickSample={(i) => { setSelected(i); if (!running) setWatch(null) }}
+            />
+
+            {rows.length === 0 ? (
+              <div className="card grid place-items-center gap-2 p-10 text-center">
+                <Gauge className="h-8 w-8 text-zinc-600" />
+                <p className="text-sm text-zinc-300">{running ? 'Results appear here as each model finishes.' : 'Press Run to fill the leaderboard.'}</p>
+              </div>
+            ) : (
+              <>
+                {SECTIONS.map((s) => (
+                  <Section key={s.id} id={s.id} title={s.title} blurb={s.blurb}>
+                    {s.id === 'overall' ? (
+                      <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                        <MetricCard metric={evsMetric} rows={rows} highlight={highlight} />
+                        <div className="card p-4 text-sm leading-relaxed text-zinc-400">
+                          <h3 className="text-[15px] font-semibold text-zinc-100">How to read the EVS</h3>
+                          <p className="mt-2 font-mono text-[13px] text-zinc-200">EVS = (Accuracy × 100) / (Latency<sub>ms</sub> × Size<sub>MB</sub>)</p>
+                          <p className="mt-3">Each factor counts equally, so halving the latency or halving the size doubles the score. That makes EVS great at spotting efficient models, and harsh on big ones.</p>
+                          <p className="mt-3">Its blind spot: a tiny model that is often wrong can still score high. That is why OpenBench also ranks hazard recall and lets you set a minimum accuracy under <a href="#pick" className="text-emerald-400 hover:underline">What should I pick?</a></p>
+                          <ul className="mt-3 space-y-1 text-xs">
+                            <li><b className="text-zinc-200">Latency</b> is the median per-call time measured live in this browser.</li>
+                            <li><b className="text-zinc-200">Accuracy</b> is {accSource === 'heldout' ? 'from 1,000 held-out windows' : 'from the 20 live fixtures'} (switch it in the controls).</li>
+                          </ul>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
+                        {METRICS.filter((m) => m.section === (s.id as SectionId)).map((m) => <MetricCard key={m.id} metric={m} rows={rows} highlight={highlight} />)}
+                      </div>
+                    )}
+                  </Section>
+                ))}
+
+                <Section id="tradeoffs" title="Trade-offs" blurb="Up and to the left is better. Bubble size is file size; the x-axis is logarithmic.">
+                  <div className="card p-4"><TradeoffScatter rows={rows} /></div>
+                </Section>
+
+                <Section id="pick" title="What should I pick?" blurb="Tell OpenBench about your hardware and it will explain what each choice means for you.">
+                  <Recommendations rows={rows} c={constraints} setC={setConstraints} />
+                </Section>
+
+                <Section id="raw" title="Raw data" blurb="Every timed inference, and the full table behind the charts."
+                  right={<button onClick={exportReport} className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:text-zinc-50"><Download className="h-3.5 w-3.5" /> Export JSON</button>}>
+                  <div className="card p-4">
+                    <h3 className="mb-2 flex items-center gap-2 text-sm text-zinc-200"><ListChecks className="h-4 w-4 text-zinc-500" />Per-inference latency (log scale; spikes are jitter)</h3>
+                    <LatencyTimeline rows={rows} budget={constraints.latencyBudgetMs} />
+                  </div>
+                  <div className="card mt-4 overflow-x-auto p-4">
+                    <table className="w-full min-w-[900px] text-left text-xs">
+                      <thead className="text-zinc-500">
+                        <tr className="border-b border-zinc-800">
+                          {['Model', 'Backend', 'Fixtures', 'Held-out acc', 'Hazard rec.', 'F1', 'Noisy acc', 'Calls/timing', 'Mean', 'p50', 'p95', 'Max', 'σ', 'Load', 'Size MB', 'Params', 'EVS'].map((h) => <th key={h} className="py-2 pr-3 font-medium">{h}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody className="font-mono tabular-nums text-zinc-300">
+                        {rows.map((r) => (
+                          <tr key={r.meta.id} className="border-b border-zinc-800/60">
+                            <td className="whitespace-nowrap py-2 pr-3 font-sans text-zinc-100"><span className="mr-1.5 inline-block h-2 w-2 rounded-full" style={{ background: colorFor(r.meta.id) }} />{r.meta.name}</td>
+                            <td className="pr-3">{r.result.backendUsed}</td>
+                            <td className="pr-3">{r.result.correct}/{r.result.total}</td>
+                            <td className="pr-3">{fmt(r.meta.heldOutAccuracy * 100, 1)}%</td>
+                            <td className="pr-3">{fmt(r.meta.heldOutHazardRecall * 100, 1)}%</td>
+                            <td className="pr-3">{fmt(r.meta.heldOutMacroF1, 3)}</td>
+                            <td className="pr-3">{fmt(r.result.noisyAccuracy * 100, 0)}%</td>
+                            <td className="pr-3">×{r.result.callsPerTiming ?? 1}</td>
+                            <td className="pr-3">{fmt(r.result.meanMs, 4)}</td>
+                            <td className="pr-3">{fmt(r.result.p50Ms, 4)}</td>
+                            <td className="pr-3">{fmt(r.result.p95Ms, 4)}</td>
+                            <td className="pr-3">{fmt(r.result.maxMs, 3)}</td>
+                            <td className="pr-3">{fmt(r.result.stdMs, 4)}</td>
+                            <td className="pr-3">{fmt(r.result.loadMs, 0)}</td>
+                            <td className="pr-3">{fmt(r.meta.sizeMB, 3)}</td>
+                            <td className="pr-3">{r.meta.params.toLocaleString()}</td>
+                            <td className="pr-3 text-zinc-50">{Math.round(r.evs).toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="mt-2 text-[11px] text-zinc-500">Latencies in ms per call. Each timing averages a calibrated batch of back-to-back calls because browsers round performance.now() to about 0.1 ms.</p>
+                  </div>
+                </Section>
+              </>
+            )}
+          </main>
+        </div>
+      </div>
+
+      <footer className="mx-auto max-w-[1400px] border-t border-zinc-900 px-4 py-6 text-[11px] text-zinc-600 sm:px-6">
+        OpenBench · MIT licensed · onnxruntime-web, React, Recharts, scikit-learn · <a className="underline hover:text-zinc-400" href={REPO_URL}>source</a>
       </footer>
     </div>
   )
 }
 
-function Slider(props: { label: string; value: number; min: number; max: number; step: number; display: string; onChange: (v: number) => void; disabled?: boolean; hint?: string }) {
+function Section({ id, title, blurb, right, children }: { id: string; title: string; blurb: string; right?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section id={id} className="scroll-mt-20">
+      <div className="mb-3 flex items-end justify-between gap-3 border-b border-zinc-800/80 pb-2">
+        <div>
+          <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-zinc-100"><span className="text-zinc-500">{SECTION_ICON[id]}</span>{title}</h2>
+          <p className="mt-0.5 text-xs text-zinc-500">{blurb}</p>
+        </div>
+        {right}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function Segmented({ options, value, onChange, disabled, mono }: { options: { key: string; label: string }[]; value: string; onChange: (k: string) => void; disabled?: boolean; mono?: boolean }) {
+  return (
+    <div className="flex rounded-lg border border-zinc-800 p-0.5 text-xs">
+      {options.map((o) => (
+        <button key={o.key} disabled={disabled} onClick={() => onChange(o.key)}
+          className={`flex-1 rounded-md py-1.5 transition ${mono ? 'font-mono' : ''} ${value === o.key ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'} disabled:opacity-50`}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function Slider(props: { label: string; value: number; min: number; max: number; step: number; display: string; onChange: (v: number) => void; disabled?: boolean }) {
   return (
     <label className="block">
       <div className="mb-1.5 flex justify-between text-xs">
@@ -381,37 +457,6 @@ function Slider(props: { label: string; value: number; min: number; max: number;
         <span className="font-mono text-zinc-200">{props.display}</span>
       </div>
       <input type="range" min={props.min} max={props.max} step={props.step} value={props.value} disabled={props.disabled} onChange={(e) => props.onChange(+e.target.value)} className="disabled:opacity-40" />
-      {props.hint && <p className="mt-1 text-[11px] text-zinc-600">{props.hint}</p>}
     </label>
-  )
-}
-
-function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
-  return (
-    <div>
-      <dt className="flex items-center gap-1 text-zinc-500">{icon}{label}</dt>
-      <dd className="font-mono tabular-nums text-zinc-200">{value}</dd>
-    </div>
-  )
-}
-
-function Budget({ ok, label }: { ok: boolean | null; label: string }) {
-  if (ok === null) return <span className="rounded border border-zinc-800 px-1.5 py-0.5 text-zinc-600">{label} budget</span>
-  return ok ? (
-    <span className="flex items-center gap-1 rounded border border-emerald-500/30 px-1.5 py-0.5 text-emerald-300"><CheckCircle2 className="h-3 w-3" />{label} OK</span>
-  ) : (
-    <span className="flex items-center gap-1 rounded border border-rose-500/30 px-1.5 py-0.5 text-rose-300"><XCircle className="h-3 w-3" />{label} over</span>
-  )
-}
-
-function Panel({ title, icon, right, children }: { title: string; icon: React.ReactNode; right?: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <section className="card p-4">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 className="flex items-center gap-2 text-sm font-medium text-zinc-200"><span className="text-zinc-500">{icon}</span>{title}</h2>
-        {right}
-      </div>
-      {children}
-    </section>
   )
 }

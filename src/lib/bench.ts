@@ -1,6 +1,9 @@
 import * as ort from 'onnxruntime-web'
 import type { BenchSettings, Fixture, FixtureSet, Manifest, ModelMeta, ModelResult } from './types'
 
+/** Noise level used for the automatic robustness check. */
+export const ROBUST_SIGMA = 0.05
+
 const BASE = import.meta.env.BASE_URL
 
 // Vite emits the onnxruntime Wasm binary as a hashed asset next to the bundle.
@@ -37,8 +40,8 @@ function seededNormal(seed: number) {
   return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u())
 }
 
-export function prepareInputs(samples: Fixture[], noise: number): Float32Array[] {
-  const rand = seededNormal(1337)
+export function prepareInputs(samples: Fixture[], noise: number, seed = 1337): Float32Array[] {
+  const rand = seededNormal(seed)
   return samples.map((s) => {
     const arr = new Float32Array(s.data.length)
     for (let i = 0; i < arr.length; i++) arr[i] = s.data[i] + (noise > 0 ? noise * rand() : 0)
@@ -65,29 +68,51 @@ export function summarize(latencies: number[]) {
   }
 }
 
-const sessions = new Map<string, ort.InferenceSession>()
+/** Initialise the Wasm runtime once so the first model's cold start isn't charged for it. */
+let runtimeReady: Promise<unknown> | null = null
+export function warmRuntime(model: ModelMeta) {
+  runtimeReady ??= ort.InferenceSession.create(`${BASE}${model.file}`, { executionProviders: ['wasm'] }).catch(() => null)
+  return runtimeReady
+}
+
+const sessions = new Map<string, { session: ort.InferenceSession; loadMs: number }>()
 
 async function getSession(model: ModelMeta, backend: string) {
   const key = `${model.id}:${backend}`
   const cached = sessions.get(key)
-  if (cached) return { session: cached, loadMs: 0 }
+  if (cached) return cached
   const t0 = performance.now()
   const session = await ort.InferenceSession.create(`${BASE}${model.file}`, {
     executionProviders: [backend],
     graphOptimizationLevel: 'all',
   })
-  const loadMs = performance.now() - t0
-  sessions.set(key, session)
-  return { session, loadMs }
+  const entry = { session, loadMs: performance.now() - t0 }
+  sessions.set(key, entry)
+  return entry
 }
 
-function argmax(a: ArrayLike<number>, off: number, n: number) {
+function argmax(a: ArrayLike<number>, n: number) {
   let best = 0
-  for (let i = 1; i < n; i++) if (a[off + i] > a[off + best]) best = i
+  for (let i = 1; i < n; i++) if (a[i] > a[best]) best = i
   return best
 }
 
-const tick = () => new Promise<void>((r) => setTimeout(r, 0))
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+export type Phase = 'loading' | 'watching' | 'robustness' | 'timing' | 'done'
+
+export interface VisualStep {
+  modelId: string
+  sampleIndex: number
+  probs: number[]
+  ms: number
+}
+
+export interface BenchCallbacks {
+  onPhase?: (modelId: string, phase: Phase) => void
+  onVisual?: (step: VisualStep) => void
+  onProgress?: (modelId: string, pct: number) => void
+}
 
 export async function benchmarkModel(
   model: ModelMeta,
@@ -95,14 +120,15 @@ export async function benchmarkModel(
   inputs: Float32Array[],
   nClasses: number,
   settings: BenchSettings,
-  onProgress?: (done: number, total: number) => void,
+  cb: BenchCallbacks = {},
 ): Promise<ModelResult> {
+  cb.onPhase?.(model.id, 'loading')
   let backendUsed: string = settings.backend
   let sess: { session: ort.InferenceSession; loadMs: number }
   try {
     sess = await getSession(model, backendUsed)
   } catch {
-    // Tree ensembles and integer MatMul are Wasm-only kernels; fall back honestly.
+    // Tree ensembles, kNN and integer MatMul are Wasm-only kernels; fall back honestly.
     backendUsed = 'wasm'
     sess = await getSession(model, backendUsed)
   }
@@ -110,9 +136,36 @@ export async function benchmarkModel(
   const inName = session.inputNames[0]
   const probName = session.outputNames.find((n) => n.includes('prob')) ?? session.outputNames[session.outputNames.length - 1]
   const len = inputs[0].length
-
   const feed = (x: Float32Array) => ({ [inName]: new ort.Tensor('float32', x, [1, len]) })
+  const infer = async (x: Float32Array) => {
+    const out = await session.run(feed(x), [probName])
+    return Array.from(out[probName].data as Float32Array).slice(0, nClasses)
+  }
 
+  // 1. Visual pass: one real inference per sample, slowed down so people can watch it.
+  cb.onPhase?.(model.id, 'watching')
+  const probs: number[][] = []
+  for (let i = 0; i < samples.length; i++) {
+    const t0 = performance.now()
+    const p = await infer(inputs[i])
+    const ms = performance.now() - t0
+    probs.push(p)
+    if (settings.watchDelay > 0) {
+      cb.onVisual?.({ modelId: model.id, sampleIndex: i, probs: p, ms })
+      await sleep(settings.watchDelay)
+    }
+  }
+
+  // 2. Robustness: the clean fixtures with a fixed amount of sensor noise (same for every model).
+  cb.onPhase?.(model.id, 'robustness')
+  const noisy = prepareInputs(samples, ROBUST_SIGMA, 4242)
+  let noisyCorrect = 0
+  for (let i = 0; i < samples.length; i++) {
+    if (argmax(await infer(noisy[i]), nClasses) === samples[i].labelIndex) noisyCorrect++
+  }
+
+  // 3. Timing.
+  cb.onPhase?.(model.id, 'timing')
   for (let w = 0; w < settings.warmup; w++) await session.run(feed(inputs[w % inputs.length]))
 
   // Browsers coarsen performance.now() (often to 0.1 ms without cross-origin isolation),
@@ -128,38 +181,36 @@ export async function benchmarkModel(
   }
 
   const latencies: number[] = []
-  const predictions = new Array<number>(samples.length).fill(-1)
-  const confidences = new Array<number>(samples.length).fill(0)
   const total = settings.runs * samples.length
-  let done = 0
   for (let r = 0; r < settings.runs; r++) {
     for (let i = 0; i < samples.length; i++) {
       const f = feed(inputs[i])
-      let out!: ort.InferenceSession.OnnxValueMapType
       const t0 = performance.now()
-      for (let k = 0; k < inner; k++) out = await session.run(f, [probName])
-      const dt = (performance.now() - t0) / inner
-      latencies.push(dt)
-      const probs = out[probName].data as Float32Array
-      const k = argmax(probs, 0, nClasses)
-      predictions[i] = k
-      confidences[i] = probs[k]
-      done++
+      for (let k = 0; k < inner; k++) await session.run(f, [probName])
+      latencies.push((performance.now() - t0) / inner)
     }
-    onProgress?.(done, total)
-    await tick() // keep the UI responsive between passes
+    cb.onProgress?.(model.id, Math.round((((r + 1) * samples.length) / total) * 100))
+    await sleep(0) // keep the UI responsive between passes
   }
 
+  const predictions = probs.map((p) => argmax(p, nClasses))
+  const confidences = probs.map((p, i) => p[predictions[i]])
   const correct = predictions.reduce((a, p, i) => a + (p === samples[i].labelIndex ? 1 : 0), 0)
+  const hazardIdx = samples.map((s, i) => (s.labelIndex >= 2 ? i : -1)).filter((i) => i >= 0)
+  const hazardHit = hazardIdx.filter((i) => predictions[i] === samples[i].labelIndex).length
+  cb.onPhase?.(model.id, 'done')
   return {
     modelId: model.id,
     backendUsed,
     latencies,
     predictions,
     confidences,
+    probs: probs.map((p) => p.map((v) => +v.toFixed(4))),
     correct,
     total: samples.length,
     accuracy: correct / samples.length,
+    hazardRecall: hazardIdx.length ? hazardHit / hazardIdx.length : 0,
+    noisyAccuracy: noisyCorrect / samples.length,
     loadMs,
     callsPerTiming: inner,
     ...summarize(latencies),

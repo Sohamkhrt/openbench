@@ -15,31 +15,181 @@
     {
       "id": "mlp_fp32",
       "name": "TinyMLP FP32",
-      "description": "StandardScaler + MLP 384-256-128-4, float32 weights",
+      "family": "neural",
+      "description": "Scaler + MLP 384-256-128-4, float32 weights",
       "precision": "fp32",
       "file": "models/mlp_fp32.onnx",
       "sizeMB": 0.5084,
+      "params": 131972,
       "heldOutAccuracy": 0.87,
+      "heldOutMacroF1": 0.8696,
+      "heldOutHazardRecall": 0.918,
+      "heldOutRecall": [
+        0.924,
+        0.72,
+        0.84,
+        0.996
+      ],
       "heldOutSamples": 1000
     },
     {
       "id": "mlp_int8",
       "name": "TinyMLP INT8",
-      "description": "Same net, dynamic INT8 weight quantization (onnxruntime)",
+      "family": "neural",
+      "description": "TinyMLP with dynamic INT8 weight quantization",
       "precision": "int8",
       "file": "models/mlp_int8.onnx",
       "sizeMB": 0.1342,
+      "params": 131972,
       "heldOutAccuracy": 0.87,
+      "heldOutMacroF1": 0.8696,
+      "heldOutHazardRecall": 0.916,
+      "heldOutRecall": [
+        0.924,
+        0.724,
+        0.836,
+        0.996
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "wide_fp32",
+      "name": "WideMLP FP32",
+      "family": "neural",
+      "description": "Scaler + MLP 384-512-256-4, float32 weights",
+      "precision": "fp32",
+      "file": "models/wide_fp32.onnx",
+      "sizeMB": 1.2618,
+      "params": 329476,
+      "heldOutAccuracy": 0.879,
+      "heldOutMacroF1": 0.8784,
+      "heldOutHazardRecall": 0.91,
+      "heldOutRecall": [
+        0.948,
+        0.748,
+        0.824,
+        0.996
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "wide_int8",
+      "name": "WideMLP INT8",
+      "family": "neural",
+      "description": "WideMLP with dynamic INT8 weight quantization",
+      "precision": "int8",
+      "file": "models/wide_int8.onnx",
+      "sizeMB": 0.3237,
+      "params": 329476,
+      "heldOutAccuracy": 0.876,
+      "heldOutMacroF1": 0.8755,
+      "heldOutHazardRecall": 0.906,
+      "heldOutRecall": [
+        0.944,
+        0.748,
+        0.816,
+        0.996
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "logreg",
+      "name": "Logistic Regression",
+      "family": "linear",
+      "description": "Scaler + multinomial logistic regression, 1,540 weights",
+      "precision": "fp32",
+      "file": "models/logreg.onnx",
+      "sizeMB": 0.0115,
+      "params": 1540,
+      "heldOutAccuracy": 0.628,
+      "heldOutMacroF1": 0.6213,
+      "heldOutHazardRecall": 0.78,
+      "heldOutRecall": [
+        0.636,
+        0.316,
+        0.576,
+        0.984
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "dtree",
+      "name": "Decision Tree",
+      "family": "trees",
+      "description": "Single tree, depth 8, a few comparisons per prediction",
+      "precision": "trees",
+      "file": "models/dtree.onnx",
+      "sizeMB": 0.0065,
+      "params": 115,
+      "heldOutAccuracy": 0.779,
+      "heldOutMacroF1": 0.7793,
+      "heldOutHazardRecall": 0.81,
+      "heldOutRecall": [
+        0.848,
+        0.648,
+        0.656,
+        0.964
+      ],
       "heldOutSamples": 1000
     },
     {
       "id": "rf_sklearn",
       "name": "Random Forest",
-      "description": "40 trees, depth 10, scikit-learn -> skl2onnx",
+      "family": "trees",
+      "description": "40 trees, depth 10, majority vote",
       "precision": "trees",
       "file": "models/rf_sklearn.onnx",
       "sizeMB": 0.4075,
+      "params": 7774,
       "heldOutAccuracy": 0.963,
+      "heldOutMacroF1": 0.963,
+      "heldOutHazardRecall": 0.936,
+      "heldOutRecall": [
+        0.988,
+        0.992,
+        0.904,
+        0.968
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "gboost",
+      "name": "Gradient Boosting",
+      "family": "trees",
+      "description": "60 boosted depth-3 trees per class",
+      "precision": "trees",
+      "file": "models/gboost.onnx",
+      "sizeMB": 0.1294,
+      "params": 3572,
+      "heldOutAccuracy": 0.961,
+      "heldOutMacroF1": 0.961,
+      "heldOutHazardRecall": 0.932,
+      "heldOutRecall": [
+        0.996,
+        0.984,
+        0.892,
+        0.972
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "knn",
+      "name": "k-Nearest Neighbours",
+      "family": "instance",
+      "description": "k=5, keeps all 2,800 training windows in the model",
+      "precision": "fp32",
+      "file": "models/knn.onnx",
+      "sizeMB": 4.1108,
+      "params": 1075200,
+      "heldOutAccuracy": 0.65,
+      "heldOutMacroF1": 0.5856,
+      "heldOutHazardRecall": 0.8,
+      "heldOutRecall": [
+        1.0,
+        0.0,
+        0.616,
+        0.984
+      ],
       "heldOutSamples": 1000
     }
   ]

@@ -2,49 +2,57 @@
 
 **Benchmark quantized edge ML models in your browser. No backend, no GPU, no API keys, $0.**
 
-OpenBench is an evaluation playground and latency profiler for tiny models headed to edge and IoT hardware. It loads three ONNX models into [onnxruntime-web](https://onnxruntime.ai/docs/tutorials/web/), runs them on real-shaped accelerometer windows from a road-hazard detection task, times every `session.run()` with `performance.now()`, and ranks them with a live **Edge Viability Score**.
+OpenBench is an evaluation playground and latency profiler for tiny models headed to edge and IoT hardware. It loads nine ONNX models (neural nets in FP32 and INT8, linear, tree ensembles and kNN) into [onnxruntime-web](https://onnxruntime.ai/docs/tutorials/web/), shows each one classifying accelerometer windows from a road-hazard detection task in real time, times every `session.run()` with `performance.now()`, ranks them on 14 metrics including a live **Edge Viability Score**, and recommends one for your target device.
 
 **Live demo:** https://sohamkhrt.github.io/openbench/
 
-![OpenBench dashboard](docs/screenshot.png)
+
+![Live inference](docs/live-inference.png)
 
 ## Why
 
-Models that look fine in a notebook often fail on edge devices: latency spikes, memory pressure and binary size are invisible until deployment. OpenBench makes the trade-off between **accuracy, latency, size and quantization** visible in one screen, on the device you are holding, so you can pick a model before you flash firmware.
+Models that look fine in a notebook often fail on edge devices: latency spikes, memory pressure and binary size are invisible until deployment. OpenBench makes the trade-off between **accuracy, latency, size, robustness and quantization** visible in one page, on the device you are holding, and then tells you in plain English what each choice means for your hardware.
 
-## Features
+## What you see
 
-- **In-browser inference** with onnxruntime-web (WebAssembly SIMD, single thread to mimic one edge core). An optional WebGPU provider falls back to Wasm, with a visible notice, for operators it has no kernels for.
-- **Honest timing.** Warm-up passes, then per-call latency from calibrated batches of back-to-back calls, because browsers round `performance.now()` to about 0.1 ms. Mean, p50, p95, max, σ and session load time are reported.
-- **Edge Viability Score**, recomputed live:
+1. **Live inference.** Each model reads every 1.28 s accelerometer window while a cursor sweeps the signal, the pipeline (sensor window → tensor → model → probabilities) lights up, class probabilities fill in, and a scoreboard of every model × every window turns green or red. These are real `session.run()` calls, slowed down so you can follow them.
+2. **Ranked leaderboard.** 14 metrics in five sections (Overall, Prediction quality, Speed, Footprint, Robustness), each a ranked bar chart with a winner badge, a one-line definition and a "What this means for you" explainer. Toggle models on and off; hatched bars are INT8-quantized.
+3. **What should I pick?** Choose a target device (Arduino Nano 33 BLE, Raspberry Pi Pico, ESP32-S3, Pi Zero 2 W, phone), a minimum accuracy and a latency budget. OpenBench recommends a model, names a runner-up, and writes an "If you pick this" card for every model: how many hazards it misses, how fast it is, whether it fits, how it handles noise, and what quantization bought you.
+4. **Trade-offs and raw data.** Accuracy vs latency bubble chart (bubble = size), per-inference latency timeline, full results table and JSON export.
 
-  $$\text{EVS} = \frac{\text{Accuracy} \times 100}{\text{Latency (ms)} \times \text{Size (MB)}}$$
+![Leaderboard](docs/screenshot.png)
+![Recommendations](docs/recommendations.png)
 
-  Latency is the p50 per-call time. Accuracy can come from the live fixtures or the held-out test set.
-- **Interactive sliders:** timed runs, warm-up count, injected sensor noise (robustness test), and a deployment budget for p95 latency and model size with pass/fail badges.
-- **Charts** (Recharts): EVS leaderboard, accuracy vs latency bubble chart (bubble = size), per-inference latency timeline with the budget line, and a 3-axis signal inspector showing each model's prediction and confidence.
-- **Static playback fallback.** If live inference fails for any reason, the app replays a recorded benchmark (`public/playback.json`) with the same UI, so a demo never shows an error. Playback can also be chosen manually.
-- **Export** any run as JSON.
+## Metrics
+
+| Section | Metric | Source |
+|---|---|---|
+| Overall | Edge Viability Score: $\text{EVS} = \frac{\text{Accuracy} \times 100}{\text{Latency (ms)} \times \text{Size (MB)}}$ | live latency × accuracy × file size |
+| Quality | Accuracy, hazard recall (potholes + speed bumps caught), macro F1 | 1,000 held-out windows |
+| Quality | Live fixture accuracy | the 20 fixtures, in the browser |
+| Speed | p50 latency, p95 latency, jitter (p95/p50), throughput | live, `performance.now()` |
+| Footprint | File size, parameter count, cold start (load + init) | model file / live |
+| Robustness | Accuracy with 0.05 g extra sensor noise, accuracy lost to noise | live |
+
+**Timing method.** Warm-up passes, then per-call latency from calibrated batches of back-to-back calls (each timing spans at least 2 ms), because browsers round `performance.now()` to about 0.1 ms and these models run in microseconds. The Wasm runtime is initialised before the first model so cold start compares models, not the runtime. Single thread, to mimic one edge core and to work on static hosting without cross-origin isolation.
 
 ## The models
 
-| Model | What it is | Size | Held-out acc. |
-|---|---|---|---|
-| TinyMLP FP32 | StandardScaler + MLP (384-256-128-4), float32 | 0.51 MB | 87.0% |
-| TinyMLP INT8 | Same network, dynamic INT8 weight quantization | 0.13 MB | 87.0% |
-| Random Forest | 40 trees, depth 10, scikit-learn exported with skl2onnx | 0.41 MB | 96.3% |
+| Model | What it is | Size | Held-out acc. | Hazard recall |
+|---|---|---|---|---|
+| TinyMLP FP32 | Scaler + MLP 384-256-128-4 | 0.51 MB | 87.0% | 91.8% |
+| TinyMLP INT8 | Same, dynamic INT8 weights | 0.13 MB | 87.0% | 91.6% |
+| WideMLP FP32 | Scaler + MLP 384-512-256-4 | 1.26 MB | 87.9% | 91.0% |
+| WideMLP INT8 | Same, dynamic INT8 weights | 0.32 MB | 87.6% | 90.6% |
+| Logistic Regression | Scaler + multinomial linear model | 11.8 KB | 62.8% | 78.0% |
+| Decision Tree | Single tree, depth 8 | 6.6 KB | 77.9% | 81.0% |
+| Random Forest | 40 trees, depth 10 | 0.41 MB | 96.3% | 93.6% |
+| Gradient Boosting | 60 boosted depth-3 trees per class | 0.13 MB | 96.1% | 93.2% |
+| k-Nearest Neighbours | k=5 over all 2,800 training windows | 4.11 MB | 65.0% | 80.0% |
 
-Held-out accuracy is on 1,000 windows not used in training. The INT8 model is 3.8x smaller than FP32 with no accuracy loss, and a classic tree ensemble beats both on raw windows, which is exactly the kind of result OpenBench is built to surface.
+All are trained with scikit-learn, exported with skl2onnx, and INT8 variants are made with `onnxruntime.quantization.quantize_dynamic`. Every file is far under the 15 MB limit.
 
-Sample results (headless Chromium, Wasm, 1 thread):
-
-| Model | p50 latency | p95 latency | EVS |
-|---|---|---|---|
-| TinyMLP FP32 | 0.081 ms | 0.237 ms | 2,058 |
-| TinyMLP INT8 | 0.075 ms | 0.119 ms | 8,445 |
-| Random Forest | 0.013 ms | 0.041 ms | 17,553 |
-
-Your numbers will differ by device. That is the point.
+Findings the dashboard surfaces: INT8 quantization makes the MLPs about 4× smaller with no accuracy loss; boosted trees beat neural nets on raw windows while being smaller and faster; the decision tree tops EVS by being tiny, yet misses 1 hazard in 5, which is exactly why EVS is shown next to hazard recall and an accuracy bar; kNN is a poor edge choice because it carries its whole training set.
 
 ## The data
 
@@ -89,7 +97,7 @@ manifest.json ──► ort.InferenceSession.create(model.onnx, { executionProvi
        accuracy, mean/p50/p95/max/σ, load time ─► EVS ─► charts, budgets, export
 ```
 
-Key files: `src/lib/bench.ts` (inference and timing), `src/App.tsx` (dashboard), `src/components/Charts.tsx`, `training/train.py`.
+Key files: `src/lib/bench.ts` (inference, robustness pass and timing), `src/lib/metrics.ts` (metric catalogue, explanations, device targets), `src/components/Theater.tsx` (live inference view), `src/components/Leaderboard.tsx`, `src/components/Verdicts.tsx`, `training/train.py`.
 
 ## Stack
 
@@ -99,7 +107,8 @@ React 19, Vite, TypeScript, Tailwind CSS, Lucide icons, Recharts, onnxruntime-we
 
 - Browser timing includes JavaScript and Wasm call overhead, so absolute numbers are higher than native C++ on the same chip. Relative comparisons are what matter.
 - The dataset is simulated (see above). Accuracy numbers describe the simulation, not real roads.
-- WebGL is not offered because it lacks kernels for tree ensembles and integer MatMul.
+- WebGL is not offered because it lacks kernels for tree ensembles and integer MatMul. WebGPU is offered; models without WebGPU kernels fall back to Wasm with a notice.
+- Device budgets in the recommender use storage limits of each board; latency is measured in your browser, which is typically 10 to 100× faster than a microcontroller.
 
 ## License
 

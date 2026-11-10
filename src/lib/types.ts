@@ -1,11 +1,18 @@
+export type Family = 'neural' | 'linear' | 'trees' | 'instance'
+
 export interface ModelMeta {
   id: string
   name: string
+  family: Family
   description: string
   precision: 'fp32' | 'int8' | 'trees'
   file: string
   sizeMB: number
+  params: number
   heldOutAccuracy: number
+  heldOutMacroF1: number
+  heldOutHazardRecall: number
+  heldOutRecall: number[]
   heldOutSamples: number
 }
 
@@ -37,6 +44,8 @@ export interface BenchSettings {
   runs: number
   warmup: number
   noise: number
+  /** ms pause per sample in the visual pass; 0 skips the animation */
+  watchDelay: number
 }
 
 export interface ModelResult {
@@ -44,12 +53,18 @@ export interface ModelResult {
   backendUsed: string
   /** one entry per timed inference, in order */
   latencies: number[]
-  /** predicted class index per fixture (last timed run) */
+  /** predicted class index per fixture */
   predictions: number[]
   confidences: number[]
+  /** full class probabilities per fixture */
+  probs: number[][]
   correct: number
   total: number
   accuracy: number
+  /** share of pothole + speed bump fixtures classified correctly */
+  hazardRecall: number
+  /** fixture accuracy with ROBUST_SIGMA sensor noise added */
+  noisyAccuracy: number
   meanMs: number
   p50Ms: number
   p95Ms: number
