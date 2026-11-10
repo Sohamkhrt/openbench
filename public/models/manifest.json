@@ -1,0 +1,46 @@
+{
+  "classes": [
+    "smooth",
+    "rough",
+    "pothole",
+    "speed_bump"
+  ],
+  "input": {
+    "channels": 3,
+    "length": 128,
+    "fs": 100,
+    "layout": "[x(128), y(128), z(128)] flattened, units g"
+  },
+  "models": [
+    {
+      "id": "mlp_fp32",
+      "name": "TinyMLP FP32",
+      "description": "StandardScaler + MLP 384-256-128-4, float32 weights",
+      "precision": "fp32",
+      "file": "models/mlp_fp32.onnx",
+      "sizeMB": 0.5084,
+      "heldOutAccuracy": 0.87,
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "mlp_int8",
+      "name": "TinyMLP INT8",
+      "description": "Same net, dynamic INT8 weight quantization (onnxruntime)",
+      "precision": "int8",
+      "file": "models/mlp_int8.onnx",
+      "sizeMB": 0.1342,
+      "heldOutAccuracy": 0.87,
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "rf_sklearn",
+      "name": "Random Forest",
+      "description": "40 trees, depth 10, scikit-learn -> skl2onnx",
+      "precision": "trees",
+      "file": "models/rf_sklearn.onnx",
+      "sizeMB": 0.4075,
+      "heldOutAccuracy": 0.963,
+      "heldOutSamples": 1000
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "openbench",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "train": "python3 training/train.py"
+  },
+  "dependencies": {
+    "lucide-react": "^0.511.0",
+    "onnxruntime-web": "^1.22.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "recharts": "^2.15.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.6"
+  },
+  "description": "Browser-based edge ML benchmark playground: in-browser ONNX inference, latency profiling and Edge Viability Score.",
+  "license": "MIT"
+}
