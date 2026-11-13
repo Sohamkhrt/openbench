@@ -13,6 +13,98 @@
   },
   "models": [
     {
+      "id": "cnn_fp32",
+      "name": "TinyCNN FP32",
+      "family": "neural",
+      "description": "1D-CNN, 3 conv layers (16-32-48) + global max pool, trained with noise augmentation",
+      "precision": "fp32",
+      "file": "models/cnn_fp32.onnx",
+      "sizeMB": 0.0305,
+      "params": 7796,
+      "heldOutAccuracy": 0.995,
+      "heldOutMacroF1": 0.995,
+      "heldOutHazardRecall": 1.0,
+      "heldOutRecall": [
+        0.996,
+        0.984,
+        1.0,
+        1.0
+      ],
+      "heldOutConfusion": [
+        [
+          249,
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          246,
+          2,
+          0
+        ],
+        [
+          0,
+          0,
+          250,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          250
+        ]
+      ],
+      "heldOutSamples": 1000
+    },
+    {
+      "id": "cnn_int8",
+      "name": "TinyCNN INT8",
+      "family": "neural",
+      "description": "TinyCNN with static INT8 quantization (weights + activations)",
+      "precision": "int8",
+      "file": "models/cnn_int8.onnx",
+      "sizeMB": 0.0106,
+      "params": 7796,
+      "heldOutAccuracy": 0.994,
+      "heldOutMacroF1": 0.994,
+      "heldOutHazardRecall": 1.0,
+      "heldOutRecall": [
+        0.996,
+        0.98,
+        1.0,
+        1.0
+      ],
+      "heldOutConfusion": [
+        [
+          249,
+          1,
+          0,
+          0
+        ],
+        [
+          3,
+          245,
+          2,
+          0
+        ],
+        [
+          0,
+          0,
+          250,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          250
+        ]
+      ],
+      "heldOutSamples": 1000
+    },
+    {
       "id": "mlp_fp32",
       "name": "TinyMLP FP32",
       "family": "neural",
@@ -29,6 +121,32 @@
         0.72,
         0.84,
         0.996
+      ],
+      "heldOutConfusion": [
+        [
+          231,
+          5,
+          14,
+          0
+        ],
+        [
+          34,
+          180,
+          36,
+          0
+        ],
+        [
+          36,
+          4,
+          210,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          249
+        ]
       ],
       "heldOutSamples": 1000
     },
@@ -50,6 +168,32 @@
         0.836,
         0.996
       ],
+      "heldOutConfusion": [
+        [
+          231,
+          5,
+          14,
+          0
+        ],
+        [
+          33,
+          181,
+          36,
+          0
+        ],
+        [
+          36,
+          5,
+          209,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          249
+        ]
+      ],
       "heldOutSamples": 1000
     },
     {
@@ -69,6 +213,32 @@
         0.748,
         0.824,
         0.996
+      ],
+      "heldOutConfusion": [
+        [
+          237,
+          7,
+          6,
+          0
+        ],
+        [
+          30,
+          187,
+          32,
+          1
+        ],
+        [
+          38,
+          6,
+          206,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          249
+        ]
       ],
       "heldOutSamples": 1000
     },
@@ -90,6 +260,32 @@
         0.816,
         0.996
       ],
+      "heldOutConfusion": [
+        [
+          236,
+          7,
+          7,
+          0
+        ],
+        [
+          30,
+          187,
+          32,
+          1
+        ],
+        [
+          40,
+          6,
+          204,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          249
+        ]
+      ],
       "heldOutSamples": 1000
     },
     {
@@ -109,6 +305,32 @@
         0.316,
         0.576,
         0.984
+      ],
+      "heldOutConfusion": [
+        [
+          159,
+          50,
+          41,
+          0
+        ],
+        [
+          97,
+          79,
+          73,
+          1
+        ],
+        [
+          73,
+          33,
+          144,
+          0
+        ],
+        [
+          0,
+          0,
+          4,
+          246
+        ]
       ],
       "heldOutSamples": 1000
     },
@@ -130,6 +352,32 @@
         0.656,
         0.964
       ],
+      "heldOutConfusion": [
+        [
+          212,
+          8,
+          30,
+          0
+        ],
+        [
+          33,
+          162,
+          51,
+          4
+        ],
+        [
+          70,
+          16,
+          164,
+          0
+        ],
+        [
+          1,
+          2,
+          6,
+          241
+        ]
+      ],
       "heldOutSamples": 1000
     },
     {
@@ -149,6 +397,32 @@
         0.992,
         0.904,
         0.968
+      ],
+      "heldOutConfusion": [
+        [
+          247,
+          0,
+          3,
+          0
+        ],
+        [
+          1,
+          248,
+          1,
+          0
+        ],
+        [
+          23,
+          1,
+          226,
+          0
+        ],
+        [
+          0,
+          1,
+          7,
+          242
+        ]
       ],
       "heldOutSamples": 1000
     },
@@ -170,6 +444,32 @@
         0.892,
         0.972
       ],
+      "heldOutConfusion": [
+        [
+          249,
+          0,
+          1,
+          0
+        ],
+        [
+          2,
+          246,
+          2,
+          0
+        ],
+        [
+          26,
+          1,
+          223,
+          0
+        ],
+        [
+          0,
+          0,
+          7,
+          243
+        ]
+      ],
       "heldOutSamples": 1000
     },
     {
@@ -189,6 +489,32 @@
         0.0,
         0.616,
         0.984
+      ],
+      "heldOutConfusion": [
+        [
+          250,
+          0,
+          0,
+          0
+        ],
+        [
+          250,
+          0,
+          0,
+          0
+        ],
+        [
+          96,
+          0,
+          154,
+          0
+        ],
+        [
+          4,
+          0,
+          0,
+          246
+        ]
       ],
       "heldOutSamples": 1000
     }

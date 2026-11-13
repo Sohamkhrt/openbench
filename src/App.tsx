@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, Download, Eye, Gauge, Github, HardDrive, Info, Layers, ListChecks, Play,
-  RotateCcw, ShieldCheck, Sparkles, Table2, Target, Timer, Trophy,
+  Activity, AlertTriangle, Download, Eye, FlaskConical, Gauge, Github, HardDrive, Info, Layers, ListChecks, Play,
+  RotateCcw, ShieldCheck, Upload, X, Sparkles, Table2, Target, Timer, Trophy,
 } from 'lucide-react'
-import { benchmarkModel, warmRuntime, loadFixtures, loadJSON, loadManifest, prepareInputs, type Phase } from './lib/bench'
+import { benchmarkModel, probeModel, warmRuntime, loadFixtures, loadJSON, loadManifest, prepareInputs, type Phase } from './lib/bench'
 import { METRICS, SECTIONS, type SectionId, colorFor, fillFor, makeRow, metricById, type Row } from './lib/metrics'
-import type { Backend, BenchReport, BenchSettings, FixtureSet, Manifest, ModelResult } from './lib/types'
+import type { Backend, BenchReport, BenchSettings, FixtureSet, Manifest, ModelMeta, ModelResult } from './lib/types'
+import { ConfusionGrid } from './components/Confusion'
+import { Lab } from './components/Lab'
 import { LatencyTimeline, TradeoffScatter } from './components/Charts'
 import { GlobalHatchDefs, MetricCard } from './components/Leaderboard'
 import { Theater, type WatchState } from './components/Theater'
@@ -26,6 +28,7 @@ const SPEEDS = [
 
 const SECTION_ICON: Record<string, React.ReactNode> = {
   live: <Eye className="h-3.5 w-3.5" />,
+  lab: <FlaskConical className="h-3.5 w-3.5" />,
   overall: <Trophy className="h-3.5 w-3.5" />,
   quality: <Target className="h-3.5 w-3.5" />,
   speed: <Timer className="h-3.5 w-3.5" />,
@@ -38,6 +41,7 @@ const SECTION_ICON: Record<string, React.ReactNode> = {
 
 const NAV = [
   { id: 'live', title: 'Live inference' },
+  { id: 'lab', title: 'Try it yourself' },
   ...SECTIONS.map((s) => ({ id: s.id, title: s.title })),
   { id: 'tradeoffs', title: 'Trade-offs' },
   { id: 'pick', title: 'What should I pick?' },
@@ -54,6 +58,8 @@ export default function App() {
   const [accSource, setAccSource] = useState<AccSource>('heldout')
   const [constraints, setConstraints] = useState<Constraints>({ deviceId: 'pico', minAccuracy: 0.9, latencyBudgetMs: 0.5 })
   const [enabled, setEnabled] = useState<Record<string, boolean>>({})
+  const [custom, setCustom] = useState<ModelMeta[]>([])
+  const customCount = useRef(0)
 
   const [results, setResults] = useState<ModelResult[]>([])
   const [recorded, setRecorded] = useState(false)
@@ -87,17 +93,18 @@ export default function App() {
 
   const inputs = useMemo(() => (fixtures ? prepareInputs(fixtures.samples, settings.noise) : []), [fixtures, settings.noise])
 
-  const activeModels = useMemo(() => manifest?.models.filter((m) => enabled[m.id]) ?? [], [manifest, enabled])
+  const allModels = useMemo(() => [...(manifest?.models ?? []), ...custom], [manifest, custom])
+  const activeModels = useMemo(() => allModels.filter((m) => enabled[m.id]), [allModels, enabled])
 
   const rows: Row[] = useMemo(() => {
     if (!manifest) return []
     return results
       .map((r) => {
-        const meta = manifest.models.find((m) => m.id === r.modelId)
+        const meta = allModels.find((m) => m.id === r.modelId)
         return meta && enabled[meta.id] && !r.error ? makeRow(meta, r, accSource) : null
       })
       .filter((r): r is Row => r !== null)
-  }, [results, manifest, accSource, enabled])
+  }, [results, manifest, allModels, accSource, enabled])
 
   function fillCells(rs: ModelResult[], f: FixtureSet) {
     return Object.fromEntries(rs.map((r) => [r.modelId, r.predictions.map((p, i) => p === f.samples[i].labelIndex)]))
@@ -184,6 +191,33 @@ export default function App() {
     }
   }
 
+  async function addModel(file: File) {
+    setNotice(null)
+    const id = `custom-${++customCount.current}`
+    const meta: ModelMeta = {
+      id, name: file.name.replace(/\.onnx$/i, '').slice(0, 24) || 'My model', family: 'custom', custom: true,
+      description: `Uploaded ${file.name}; quality is measured on the 20 live fixtures`,
+      precision: 'fp32', file: URL.createObjectURL(file), sizeMB: file.size / (1024 * 1024),
+      params: Math.max(1, Math.round(file.size / 4)),
+      heldOutAccuracy: 0, heldOutMacroF1: 0, heldOutHazardRecall: 0, heldOutRecall: [], heldOutSamples: 0,
+    }
+    try {
+      const info = await probeModel(meta)
+      setCustom((c) => [...c, meta])
+      setEnabled((e) => ({ ...e, [id]: true }))
+      setMode('live')
+      setNotice(`Added "${meta.name}" (input [${info.shape.join(', ')}], output "${info.output}"${info.needsSoftmax ? ', softmax applied' : ''}). Press Run to benchmark it against the built-in models.`)
+    } catch (e) {
+      URL.revokeObjectURL(meta.file)
+      setNotice(`Could not use ${file.name}. ${e instanceof Error ? e.message : e} OpenBench needs a float32 input of 384 values ([1,384] or [1,3,128]) and an output with 4 class scores.`)
+    }
+  }
+
+  function removeModel(id: string) {
+    setCustom((c) => c.filter((m) => m.id !== id))
+    setResults((r) => r.filter((x) => x.modelId !== id))
+  }
+
   function exportReport() {
     const report: BenchReport = { createdAt: new Date().toISOString(), userAgent: navigator.userAgent, settings, results }
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })
@@ -202,7 +236,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <GlobalHatchDefs ids={manifest.models.map((m) => m.id)} />
+      <GlobalHatchDefs ids={allModels.map((m) => m.id)} />
       {/* Header */}
       <header className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/85 backdrop-blur">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
@@ -246,7 +280,7 @@ export default function App() {
             <ol className="mt-4 grid gap-2 text-xs sm:grid-cols-3">
               {[
                 ['1', 'Watch', 'See each model read the signal and make its call, live.'],
-                ['2', 'Compare', 'Ranked charts for 14 metrics, each explained in plain English.'],
+                ['2', 'Compare', 'Ranked charts for 14 metrics, each explained in plain English. Add your own model too.'],
                 ['3', 'Pick', 'Set your device and budget; get a recommendation and why.'],
               ].map(([n, t, d]) => (
                 <li key={n} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
@@ -296,15 +330,24 @@ export default function App() {
 
         {/* model picker */}
         <div className="mb-5 flex flex-wrap items-center gap-2">
-          <span className="mr-1 text-xs text-zinc-500">Comparing <b className="text-zinc-200">{activeModels.length}</b> of {manifest.models.length} models</span>
-          {manifest.models.map((m) => (
+          <span className="mr-1 text-xs text-zinc-500">Comparing <b className="text-zinc-200">{activeModels.length}</b> of {allModels.length} models</span>
+          {allModels.map((m) => (
             <button key={m.id} onClick={() => setEnabled({ ...enabled, [m.id]: !enabled[m.id] })} disabled={running}
               onMouseEnter={() => setHighlight(m.id)} onMouseLeave={() => setHighlight(null)}
               className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${enabled[m.id] ? 'border-zinc-700 bg-zinc-900 text-zinc-200' : 'border-zinc-800 text-zinc-600 line-through'}`}>
               <svg width="10" height="10" aria-hidden><rect width="10" height="10" rx="2" fill={fillFor(m)} opacity={enabled[m.id] ? 1 : 0.3} /></svg>
               {m.name}
+              {m.custom && !running && (
+                <span role="button" tabIndex={0} aria-label={`Remove ${m.name}`} onClick={(e) => { e.stopPropagation(); removeModel(m.id) }} onKeyDown={(e) => { if (e.key === 'Enter') removeModel(m.id) }} className="ml-0.5 rounded-full text-zinc-500 hover:text-rose-300">
+                  <X className="h-3 w-3" />
+                </span>
+              )}
             </button>
           ))}
+          <label className={`flex cursor-pointer items-center gap-1.5 rounded-full border border-dashed border-emerald-500/40 px-2.5 py-1 text-xs text-emerald-300 transition hover:bg-emerald-500/10 ${running ? 'pointer-events-none opacity-50' : ''}`}>
+            <Upload className="h-3 w-3" /> Add your .onnx
+            <input type="file" accept=".onnx" className="sr-only" disabled={running} onChange={(e) => { const f = e.target.files?.[0]; if (f) void addModel(f); e.target.value = '' }} />
+          </label>
           <span className="ml-auto text-[11px] text-zinc-600">Hatched bars = INT8 quantized</span>
         </div>
 
@@ -328,6 +371,10 @@ export default function App() {
               watch={watch} phases={phases} cells={cells} progress={progress} running={running} sweepMs={settings.watchDelay}
               selected={selected} onPickSample={(i) => { setSelected(i); if (!running) setWatch(null) }}
             />
+
+            <Section id="lab" title="Try it yourself" blurb="Shape a road signal with the sliders, or record one from your phone, and watch every model react.">
+              <Lab models={activeModels} classes={manifest.classes} disabled={running} />
+            </Section>
 
             {rows.length === 0 ? (
               <div className="card grid place-items-center gap-2 p-10 text-center">
@@ -353,9 +400,12 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
-                        {METRICS.filter((m) => m.section === (s.id as SectionId)).map((m) => <MetricCard key={m.id} metric={m} rows={rows} highlight={highlight} />)}
-                      </div>
+                      <>
+                        <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
+                          {METRICS.filter((m) => m.section === (s.id as SectionId)).map((m) => <MetricCard key={m.id} metric={m} rows={rows} highlight={highlight} />)}
+                        </div>
+                        {s.id === 'quality' && <ConfusionGrid rows={rows} classes={manifest.classes} />}
+                      </>
                     )}
                   </Section>
                 ))}

@@ -68,33 +68,108 @@ export function summarize(latencies: number[]) {
   }
 }
 
+const urlFor = (m: ModelMeta) => (/^(blob:|https?:)/.test(m.file) ? m.file : `${BASE}${m.file}`)
+
 /** Initialise the Wasm runtime once so the first model's cold start isn't charged for it. */
 let runtimeReady: Promise<unknown> | null = null
 export function warmRuntime(model: ModelMeta) {
-  runtimeReady ??= ort.InferenceSession.create(`${BASE}${model.file}`, { executionProviders: ['wasm'] }).catch(() => null)
+  runtimeReady ??= ort.InferenceSession.create(urlFor(model), { executionProviders: ['wasm'] }).catch(() => null)
   return runtimeReady
 }
 
-const sessions = new Map<string, { session: ort.InferenceSession; loadMs: number }>()
+interface Entry {
+  session: ort.InferenceSession
+  loadMs: number
+  inName: string
+  outName: string
+  /** input tensor shape that the model accepted */
+  shape: number[]
+  /** output is logits, not probabilities */
+  needsSoftmax: boolean
+}
 
-async function getSession(model: ModelMeta, backend: string) {
+const sessions = new Map<string, Entry>()
+const N_CLASSES = 4
+const INPUT_SHAPES = [[1, 384], [1, 3, 128]]
+
+export function softmax(v: number[]) {
+  const m = Math.max(...v)
+  const e = v.map((x) => Math.exp(x - m))
+  const s = e.reduce((a, c) => a + c, 0)
+  return e.map((x) => x / s)
+}
+
+/**
+ * Create a session and work out how to talk to the model: which input shape it takes
+ * ([1,384] flat or [1,3,128]) and which output holds one float per class.
+ */
+async function getSession(model: ModelMeta, backend: string): Promise<Entry> {
   const key = `${model.id}:${backend}`
   const cached = sessions.get(key)
   if (cached) return cached
   const t0 = performance.now()
-  const session = await ort.InferenceSession.create(`${BASE}${model.file}`, {
+  const session = await ort.InferenceSession.create(urlFor(model), {
     executionProviders: [backend],
     graphOptimizationLevel: 'all',
   })
-  const entry = { session, loadMs: performance.now() - t0 }
-  sessions.set(key, entry)
-  return entry
+  const loadMs = performance.now() - t0
+  const inName = session.inputNames[0]
+  let lastErr: unknown
+  for (const shape of INPUT_SHAPES) {
+    try {
+      const out = await session.run({ [inName]: new ort.Tensor('float32', new Float32Array(384).fill(0.5), shape) })
+      const names = session.outputNames.filter((n) => {
+        const t = out[n]
+        return t && t.type === 'float32' && t.data.length === N_CLASSES
+      })
+      const outName = names.find((n) => n.toLowerCase().includes('prob')) ?? names[0]
+      if (!outName) throw new Error(`no float output with ${N_CLASSES} values (one per class) was found`)
+      const vals = Array.from(out[outName].data as Float32Array)
+      const sum = vals.reduce((a, c) => a + c, 0)
+      const needsSoftmax = Math.abs(sum - 1) > 0.01 || vals.some((v) => v < 0)
+      const entry: Entry = { session, loadMs, inName, outName, shape, needsSoftmax }
+      sessions.set(key, entry)
+      return entry
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  throw new Error(`Model does not accept a [1,384] or [1,3,128] float32 input: ${lastErr instanceof Error ? lastErr.message : lastErr}`)
+}
+
+async function inferWith(e: Entry, x: Float32Array) {
+  const out = await e.session.run({ [e.inName]: new ort.Tensor('float32', x, e.shape) }, [e.outName])
+  const v = Array.from(out[e.outName].data as Float32Array)
+  return e.needsSoftmax ? softmax(v) : v
+}
+
+/** Validate a user-supplied model. Throws a readable error if it cannot be benchmarked. */
+export async function probeModel(model: ModelMeta) {
+  const e = await getSession(model, 'wasm')
+  return { shape: e.shape, output: e.outName, needsSoftmax: e.needsSoftmax }
+}
+
+/** One prediction on the Wasm backend; used by the signal lab. */
+export async function predict(model: ModelMeta, x: Float32Array) {
+  return inferWith(await getSession(model, 'wasm'), x)
 }
 
 function argmax(a: ArrayLike<number>, n: number) {
   let best = 0
   for (let i = 1; i < n; i++) if (a[i] > a[best]) best = i
   return best
+}
+
+export function macroF1(cm: number[][]) {
+  const n = cm.length
+  let total = 0
+  for (let c = 0; c < n; c++) {
+    const tp = cm[c][c]
+    const fn = cm[c].reduce((a, v) => a + v, 0) - tp
+    const fp = cm.reduce((a, row) => a + row[c], 0) - tp
+    total += tp === 0 ? 0 : (2 * tp) / (2 * tp + fp + fn)
+  }
+  return total / n
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -124,23 +199,19 @@ export async function benchmarkModel(
 ): Promise<ModelResult> {
   cb.onPhase?.(model.id, 'loading')
   let backendUsed: string = settings.backend
-  let sess: { session: ort.InferenceSession; loadMs: number }
+  let sess: Entry
   try {
     sess = await getSession(model, backendUsed)
-  } catch {
-    // Tree ensembles, kNN and integer MatMul are Wasm-only kernels; fall back honestly.
+  } catch (e) {
+    if (backendUsed === 'wasm') throw e
+    // Tree ensembles, kNN and integer ops are Wasm-only kernels; fall back honestly.
     backendUsed = 'wasm'
     sess = await getSession(model, backendUsed)
   }
   const { session, loadMs } = sess
-  const inName = session.inputNames[0]
-  const probName = session.outputNames.find((n) => n.includes('prob')) ?? session.outputNames[session.outputNames.length - 1]
-  const len = inputs[0].length
-  const feed = (x: Float32Array) => ({ [inName]: new ort.Tensor('float32', x, [1, len]) })
-  const infer = async (x: Float32Array) => {
-    const out = await session.run(feed(x), [probName])
-    return Array.from(out[probName].data as Float32Array).slice(0, nClasses)
-  }
+  const probName = sess.outName
+  const feed = (x: Float32Array) => ({ [sess.inName]: new ort.Tensor('float32', x, sess.shape) })
+  const infer = (x: Float32Array) => inferWith(sess, x)
 
   // 1. Visual pass: one real inference per sample, slowed down so people can watch it.
   cb.onPhase?.(model.id, 'watching')
@@ -198,6 +269,8 @@ export async function benchmarkModel(
   const correct = predictions.reduce((a, p, i) => a + (p === samples[i].labelIndex ? 1 : 0), 0)
   const hazardIdx = samples.map((s, i) => (s.labelIndex >= 2 ? i : -1)).filter((i) => i >= 0)
   const hazardHit = hazardIdx.filter((i) => predictions[i] === samples[i].labelIndex).length
+  const confusion = Array.from({ length: nClasses }, () => new Array<number>(nClasses).fill(0))
+  predictions.forEach((p, i) => confusion[samples[i].labelIndex][p]++)
   cb.onPhase?.(model.id, 'done')
   return {
     modelId: model.id,
@@ -209,6 +282,8 @@ export async function benchmarkModel(
     correct,
     total: samples.length,
     accuracy: correct / samples.length,
+    macroF1: macroF1(confusion),
+    confusion,
     hazardRecall: hazardIdx.length ? hazardHit / hazardIdx.length : 0,
     noisyAccuracy: noisyCorrect / samples.length,
     loadMs,

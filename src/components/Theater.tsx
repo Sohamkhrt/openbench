@@ -19,14 +19,14 @@ const PHASES: { id: Phase; label: string }[] = [
   { id: 'timing', label: 'Precision timing' },
 ]
 
-const CLASS_LABEL: Record<string, string> = {
+export const CLASS_LABEL: Record<string, string> = {
   smooth: 'Smooth road',
   rough: 'Rough road',
   pothole: 'Pothole',
   speed_bump: 'Speed bump',
 }
 
-function Wave({ data, length, sweepMs, tick }: { data: number[]; length: number; sweepMs: number; tick: number }) {
+export function Wave({ data, length, sweepMs, tick }: { data: number[]; length: number; sweepMs: number; tick: number }) {
   const W = 600
   const H = 150
   const axes = [

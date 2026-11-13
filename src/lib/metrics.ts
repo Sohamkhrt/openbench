@@ -10,6 +10,17 @@ export interface Row {
 }
 
 export function makeRow(meta: ModelMeta, result: ModelResult, source: 'live' | 'heldout'): Row {
+  if (meta.custom) {
+    // No held-out set exists for an uploaded model, so its quality comes from the live fixtures.
+    meta = {
+      ...meta,
+      heldOutAccuracy: result.accuracy,
+      heldOutHazardRecall: result.hazardRecall,
+      heldOutMacroF1: result.macroF1 ?? 0,
+      heldOutConfusion: result.confusion,
+      heldOutSamples: result.total,
+    }
+  }
   const accuracy = source === 'live' ? result.accuracy : meta.heldOutAccuracy
   return { meta, result, accuracy, evs: evs(accuracy, result.p50Ms, meta.sizeMB) }
 }
@@ -17,6 +28,8 @@ export function makeRow(meta: ModelMeta, result: ModelResult, source: 'live' | '
 /* ---------- colours: cool hues for neural nets, warm for trees ---------- */
 
 export const MODEL_COLORS: Record<string, string> = {
+  cnn_fp32: '#2dd4bf',
+  cnn_int8: '#2dd4bf',
   mlp_fp32: '#60a5fa',
   mlp_int8: '#60a5fa',
   wide_fp32: '#818cf8',
@@ -27,7 +40,7 @@ export const MODEL_COLORS: Record<string, string> = {
   gboost: '#f87171',
   knn: '#94a3b8',
 }
-export const colorFor = (id: string) => MODEL_COLORS[id] ?? '#a1a1aa'
+export const colorFor = (id: string) => MODEL_COLORS[id] ?? (id.startsWith('custom') ? '#f472b6' : '#a1a1aa')
 /** INT8 models are drawn hatched so quantized variants stand out next to their FP32 twin. */
 export const isQuantized = (m: ModelMeta) => m.precision === 'int8'
 export const fillFor = (m: ModelMeta) => (isQuantized(m) ? `url(#hatch-${m.id})` : colorFor(m.id))
@@ -37,6 +50,7 @@ export const FAMILY_LABEL: Record<string, string> = {
   linear: 'Linear',
   trees: 'Tree ensemble',
   instance: 'Instance-based',
+  custom: 'Your model',
 }
 
 /* ---------- metric catalogue ---------- */

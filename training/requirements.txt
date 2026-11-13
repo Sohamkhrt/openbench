@@ -3,3 +3,5 @@ scikit-learn>=1.5
 skl2onnx>=1.17
 onnx>=1.16
 onnxruntime>=1.18
+jax
+optax

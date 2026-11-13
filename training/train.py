@@ -2,11 +2,11 @@
 OpenBench model training + ONNX export.
 
 Generates a physically-modelled road-vibration dataset (3-axis accelerometer,
-100 Hz, 1.28 s windows), trains nine edge models and exports them to ONNX:
+100 Hz, 1.28 s windows), trains eleven edge models and exports them to ONNX:
 
   1. mlp_fp32.onnx   - baseline FP32 neural net (scikit-learn MLP)
   2. mlp_int8.onnx   - same network, dynamic INT8 quantization (onnxruntime)
-  ...plus a wider MLP (FP32 + INT8), logistic regression, a single decision
+  ...plus a 1D-CNN (JAX, FP32 + static INT8), a wider MLP (FP32 + INT8), logistic regression, a single decision
   tree, a random forest, gradient boosting and k-nearest neighbours.
 
 Also writes 20 static JSON fixtures (5 per class) for the browser playground,
@@ -21,16 +21,19 @@ import time
 
 import numpy as np
 import onnxruntime as ort
-from onnxruntime.quantization import QuantType, quantize_dynamic
+from onnxruntime.quantization import (CalibrationDataReader, QuantFormat, QuantType,
+                                      quantize_dynamic, quantize_static)
 from skl2onnx import to_onnx
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import accuracy_score, f1_score, recall_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, recall_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+
+import cnn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_MODELS = os.path.join(ROOT, "public", "models")
@@ -179,6 +182,46 @@ SPECS = [
 manifest = {"classes": CLASSES, "input": {"channels": 3, "length": N, "fs": FS,
                                            "layout": "[x(128), y(128), z(128)] flattened, units g"},
             "models": []}
+class Calib(CalibrationDataReader):
+    def __init__(self, X):
+        self.it = iter([{"input": X[i:i + 1]} for i in range(len(X))])
+
+    def get_next(self):
+        return next(self.it, None)
+
+
+def record(mid, name, family, desc, prec, path, params):
+    pred, ms, _ = onnx_acc(path, Xte, yte)
+    hazard = np.isin(yte, [2, 3])
+    m = {
+        "id": mid, "name": name, "family": family, "description": desc, "precision": prec,
+        "file": f"models/{mid}.onnx", "sizeMB": round(mb(path), 4), "params": params,
+        "heldOutAccuracy": round(float(accuracy_score(yte, pred)), 4),
+        "heldOutMacroF1": round(float(f1_score(yte, pred, average="macro")), 4),
+        "heldOutHazardRecall": round(float(np.mean(pred[hazard] == yte[hazard])), 4),
+        "heldOutRecall": [round(float(r), 4) for r in recall_score(yte, pred, average=None)],
+        "heldOutConfusion": confusion_matrix(yte, pred, labels=[0, 1, 2, 3]).tolist(),
+        "heldOutSamples": int(len(yte)),
+    }
+    print(f"  acc={m['heldOutAccuracy']} f1={m['heldOutMacroF1']} hazard={m['heldOutHazardRecall']} "
+          f"size={m['sizeMB']}MB params={params} cpu={ms:.4f}ms")
+    manifest["models"].append(m)
+
+
+# 1D-CNN (JAX) + static INT8 quantization calibrated on 200 training windows
+print("Training cnn_fp32 ...")
+cnn_params, cnn_mean, cnn_std = cnn.train(Xtr, ytr)
+p_cnn = os.path.join(OUT_MODELS, "cnn_fp32.onnx")
+p_cnn8 = os.path.join(OUT_MODELS, "cnn_int8.onnx")
+cnn.export(cnn_params, cnn_mean, cnn_std, p_cnn)
+record("cnn_fp32", "TinyCNN FP32", "neural", "1D-CNN, 3 conv layers (16-32-48) + global max pool, trained with noise augmentation", "fp32",
+       p_cnn, cnn.n_params(cnn_params))
+print("Quantizing cnn_fp32 -> cnn_int8 (static)")
+quantize_static(p_cnn, p_cnn8, Calib(Xtr[:200]), quant_format=QuantFormat.QOperator,
+                activation_type=QuantType.QUInt8, weight_type=QuantType.QInt8, per_channel=False)
+record("cnn_int8", "TinyCNN INT8", "neural", "TinyCNN with static INT8 quantization (weights + activations)", "int8",
+       p_cnn8, cnn.n_params(cnn_params))
+
 paths, fitted = {}, {}
 for mid, name, family, desc, prec, est in SPECS:
     path = os.path.join(OUT_MODELS, f"{mid}.onnx")
@@ -195,20 +238,7 @@ for mid, name, family, desc, prec, est in SPECS:
             f.write(onx.SerializeToString())
         params = n_params(est)
     paths[mid], fitted[mid] = path, params
-    pred, ms, outs = onnx_acc(path, Xte, yte)
-    hazard = np.isin(yte, [2, 3])
-    m = {
-        "id": mid, "name": name, "family": family, "description": desc, "precision": prec,
-        "file": f"models/{mid}.onnx", "sizeMB": round(mb(path), 4), "params": params,
-        "heldOutAccuracy": round(float(accuracy_score(yte, pred)), 4),
-        "heldOutMacroF1": round(float(f1_score(yte, pred, average="macro")), 4),
-        "heldOutHazardRecall": round(float(np.mean(pred[hazard] == yte[hazard])), 4),
-        "heldOutRecall": [round(float(r), 4) for r in recall_score(yte, pred, average=None)],
-        "heldOutSamples": int(len(yte)),
-    }
-    print(f"  acc={m['heldOutAccuracy']} f1={m['heldOutMacroF1']} hazard={m['heldOutHazardRecall']} "
-          f"size={m['sizeMB']}MB params={params} cpu={ms:.4f}ms")
-    manifest["models"].append(m)
+    record(mid, name, family, desc, prec, path, params)
 
 with open(os.path.join(OUT_MODELS, "manifest.json"), "w") as f:
     json.dump(manifest, f, indent=2)

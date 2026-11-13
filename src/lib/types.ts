@@ -1,4 +1,4 @@
-export type Family = 'neural' | 'linear' | 'trees' | 'instance'
+export type Family = 'neural' | 'linear' | 'trees' | 'instance' | 'custom'
 
 export interface ModelMeta {
   id: string
@@ -13,7 +13,11 @@ export interface ModelMeta {
   heldOutMacroF1: number
   heldOutHazardRecall: number
   heldOutRecall: number[]
+  /** rows = true class, columns = predicted class */
+  heldOutConfusion?: number[][]
   heldOutSamples: number
+  /** uploaded by the user in this session; quality numbers come from the 20 live fixtures */
+  custom?: boolean
 }
 
 export interface Manifest {
@@ -61,6 +65,9 @@ export interface ModelResult {
   correct: number
   total: number
   accuracy: number
+  macroF1?: number
+  /** live confusion matrix on the fixtures: rows = truth, columns = predicted */
+  confusion?: number[][]
   /** share of pothole + speed bump fixtures classified correctly */
   hazardRecall: number
   /** fixture accuracy with ROBUST_SIGMA sensor noise added */
